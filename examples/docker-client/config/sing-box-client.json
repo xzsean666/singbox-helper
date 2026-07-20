@@ -14,21 +14,21 @@
     {
       "type": "vless",
       "tag": "proxy-out",
-      "server": "REPLACE_ME.example.com",
-      "server_port": 20000,
-      "uuid": "REPLACE_ME-0000-0000-0000-000000000000",
+      "server": "46.8.101.219",
+      "server_port": 39799,
+      "uuid": "b6a4beab-871f-4f96-ba25-7c90e79aa714",
       "flow": "xtls-rprx-vision",
       "tls": {
         "enabled": true,
-        "server_name": "www.microsoft.com",
+        "server_name": "www.apple.com",
         "utls": {
           "enabled": true,
           "fingerprint": "chrome"
         },
         "reality": {
           "enabled": true,
-          "public_key": "REPLACE_ME",
-          "short_id": "REPLACE_ME"
+          "public_key": "I7lGhqhmhpuPh5W95BCrAOC-SZAFj3BnuBN1fe0wDVY",
+          "short_id": "21933734ca49c7c0"
         }
       }
     },

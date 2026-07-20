@@ -65,7 +65,12 @@ build_ssh_args
 build_scp_args
 
 if [[ -z "$ALIAS" ]]; then
-    ALIAS=$(echo "$SSH_HOST" | tr -c 'a-zA-Z0-9' '-')
+    REMOTE_HOSTNAME=$(ssh "${SSH_ARGS[@]}" "hostname" 2>/dev/null || true)
+    if [[ -n "$REMOTE_HOSTNAME" ]]; then
+        ALIAS=$(echo "$REMOTE_HOSTNAME" | tr -c 'a-zA-Z0-9' '-')
+    else
+        ALIAS=$(echo "$SSH_HOST" | tr -c 'a-zA-Z0-9' '-')
+    fi
 fi
 
 SERVER_DIR="${SCRIPT_DIR}/servers/${ALIAS}"
@@ -155,7 +160,7 @@ UUID=${UUID}
 SHORT_ID=${SHORT_ID}
 SNI=${SNI}
 PUBLIC_KEY=${PUBLIC_KEY}
-SSH_COMMAND=${SSH_CMD}
+SSH_COMMAND="${SSH_CMD}"
 EOF
 
 render_client_config() {
@@ -173,6 +178,7 @@ mkdir -p "${SCRIPT_DIR}/examples/docker-client/config"
 cp "${SERVER_DIR}/client-config.json" "${SCRIPT_DIR}/examples/docker-client/config/sing-box-client.json"
 
 VLESS_URI="vless://${UUID}@${SSH_HOST}:${PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp#${ALIAS}"
+echo "${VLESS_URI}" > "${SERVER_DIR}/vless.txt"
 
 echo ""
 echo "==> Done. Server info saved to ${SERVER_DIR}/"
@@ -186,6 +192,18 @@ echo "    Short ID:   ${SHORT_ID}"
 echo ""
 echo "    vless:// link (import into v2rayN/NekoBox/Shadowrocket/etc.):"
 echo "    ${VLESS_URI}"
+echo ""
+
+if command -v qrencode >/dev/null 2>&1; then
+    echo "    Scan this QR code with a mobile client (v2rayNG, Shadowrocket, etc.):"
+    echo ""
+    qrencode -t ANSIUTF8 "${VLESS_URI}"
+    qrencode -o "${SERVER_DIR}/qrcode.png" "${VLESS_URI}"
+    echo "    QR code image saved to ${SERVER_DIR}/qrcode.png"
+else
+    echo "    (qrencode not installed - skipping QR code generation. Install it to get a scannable QR code.)"
+fi
+
 echo ""
 echo "    Docker client example is ready at: examples/docker-client/"
 echo "    Run: cd examples/docker-client && docker compose up -d"

@@ -132,7 +132,8 @@ else
 fi
 
 $SUDO systemctl daemon-reload
-$SUDO systemctl enable --now sing-box
+$SUDO systemctl enable sing-box >/dev/null
+$SUDO systemctl restart sing-box
 
 sleep 1
 
