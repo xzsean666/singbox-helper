@@ -68,6 +68,33 @@ into GUI clients (v2rayN, NekoBox, Shadowrocket, etc.).
 Re-running against an alias that already exists is refused unless you pass
 `--force` (which regenerates a new port/UUID/keys and reinstalls).
 
+### Reinstalling
+
+```bash
+./reinstall-server.sh myserver
+./reinstall-server.sh myserver --sni www.apple.com
+```
+
+Reuses the ssh command already saved in `servers/myserver/info.env`, so you
+don't have to type it again. Equivalent to running `setup-server.sh` with
+`--force` against that saved ssh command; regenerates the port/UUID/keys and
+overwrites the existing service. Pass `--sni` to switch the camouflage
+domain, otherwise the existing one is kept.
+
+### Uninstalling
+
+```bash
+./uninstall-server.sh myserver
+./uninstall-server.sh myserver --yes
+./uninstall-server.sh myserver --purge-binary
+```
+
+Stops and removes the `sing-box` systemd service and its config from the
+remote host, closes the port in `ufw` if it was opened there, and deletes
+the local `servers/myserver/` directory. Prompts for confirmation unless
+`--yes` is passed. The `sing-box` binary itself is left on the remote host
+(harmless, and shared across reinstalls) unless `--purge-binary` is given.
+
 ## Using the proxy from docker (on any other server)
 
 See [`examples/docker-client/`](examples/docker-client/) - a docker-compose
