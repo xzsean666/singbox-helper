@@ -1,0 +1,79 @@
+# singbox-helper
+
+Give it an ssh login command for a server, and it installs and configures a
+[sing-box](https://sing-box.sagernet.org) **VLESS + Reality** proxy server
+there. Includes a ready-to-run docker-compose example showing how a container
+on a *different* server can use that proxy to reach the internet.
+
+VLESS + Reality was chosen over plain Shadowsocks for its resistance to active
+probing and DPI: the server performs a real TLS handshake using the
+certificate of a genuine third-party website (the "SNI"/camouflage domain),
+so passive traffic analysis sees what looks like a normal HTTPS connection to
+that site, and anyone actively probing the port without the right key just
+gets served that site's real content instead of anything that reveals a
+proxy is running.
+
+## Prerequisites
+
+**Local machine** (where you run `setup-server.sh`): `bash`, `ssh`, `scp`, `openssl`.
+
+**Remote server**: a systemd-based Linux distro (Ubuntu/Debian/CentOS/etc.),
+and either a root SSH login or a user with **passwordless** sudo. The script
+doesn't prompt for a sudo password, so an account that requires one at the
+prompt won't work non-interactively.
+
+## Usage
+
+```bash
+./setup-server.sh "ssh root@1.2.3.4"
+# or
+./setup-server.sh "ssh -i ~/.ssh/sean root@1.2.3.4"
+# or, to pick a different camouflage domain than the default (www.microsoft.com):
+./setup-server.sh "ssh root@1.2.3.4" --sni www.apple.com
+```
+
+This will:
+1. Parse the ssh command you gave it (identity file, user, host, port).
+2. Generate a random high port (never 80/443), a UUID, and a Reality short ID.
+3. Install sing-box on the remote host (downloads the latest release binary
+   if it's not already installed), generate a Reality keypair **on the
+   server itself** (the private key never leaves it), write the config, and
+   run it as a `sing-box` systemd service.
+4. Open the chosen port in `ufw` if it's active; otherwise it'll tell you to
+   open it yourself (e.g. a cloud provider's security group / firewalld).
+5. Save the connection details locally and generate a docker-client config.
+
+The `--sni` domain must be a real, internet-reachable site that serves TLS
+1.3 on port 443 - the server "pretends" to be that site to anyone who
+doesn't have your key. `www.microsoft.com` is a safe default; other common
+choices are `www.apple.com`, `www.samsung.com`, or `addons.mozilla.org`.
+
+### Naming a server / setting up more than one
+
+```bash
+./setup-server.sh "ssh root@1.2.3.4" --name tokyo
+./setup-server.sh "ssh root@5.6.7.8" --name frankfurt
+```
+
+Each server's details are saved under `servers/<alias>/` (gitignored - these
+are credentials, not something to commit):
+
+- `info.env` - host, port, UUID, short ID, SNI, public key, and the ssh
+  command used
+- `client-config.json` - a ready sing-box **client** config pointing at it
+
+The setup script also prints a `vless://...` link you can import directly
+into GUI clients (v2rayN, NekoBox, Shadowrocket, etc.).
+
+Re-running against an alias that already exists is refused unless you pass
+`--force` (which regenerates a new port/UUID/keys and reinstalls).
+
+## Using the proxy from docker (on any other server)
+
+See [`examples/docker-client/`](examples/docker-client/) - a docker-compose
+setup where a business container shares the sing-box client container's
+network namespace, so it can reach the proxy at `127.0.0.1:1080` with no
+extra docker networking. `setup-server.sh` automatically drops the
+most-recently-set-up server's client config into that example so it works
+out of the box; see that directory's README for how to point it at a
+different server if you've set up several.
