@@ -94,6 +94,8 @@ gen_uuid() {
 
 UUID=$(gen_uuid)
 SHORT_ID=$(openssl rand -hex 8)
+HTTP_USERNAME="proxy"
+HTTP_PASSWORD=$(openssl rand -hex 16)
 
 TMP_WORK=$(mktemp -d)
 cleanup() { rm -rf "$TMP_WORK"; }
@@ -109,7 +111,11 @@ SUCCESS=0
 
 while [[ $ATTEMPT -le $MAX_ATTEMPTS ]]; do
     PORT=$(( (RANDOM % 40000) + 20000 ))
-    echo "==> Attempt ${ATTEMPT}/${MAX_ATTEMPTS}: trying port ${PORT}"
+    HTTP_PORT=$(( (RANDOM % 40000) + 20000 ))
+    while [[ "$HTTP_PORT" -eq "$PORT" ]]; do
+        HTTP_PORT=$(( (RANDOM % 40000) + 20000 ))
+    done
+    echo "==> Attempt ${ATTEMPT}/${MAX_ATTEMPTS}: trying VLESS port ${PORT}, HTTP proxy port ${HTTP_PORT}"
 
     ssh "${SSH_ARGS[@]}" "mkdir -p /tmp/singbox-setup"
     scp "${SCP_ARGS[@]}" \
@@ -120,7 +126,7 @@ while [[ $ATTEMPT -le $MAX_ATTEMPTS ]]; do
 
     set +e
     REMOTE_OUTPUT=$(ssh "${SSH_ARGS[@]}" \
-        "chmod +x /tmp/singbox-setup/remote_install.sh && /tmp/singbox-setup/remote_install.sh ${PORT} ${UUID} ${SHORT_ID} ${SNI}" 2>&1)
+        "chmod +x /tmp/singbox-setup/remote_install.sh && /tmp/singbox-setup/remote_install.sh ${PORT} ${HTTP_PORT} ${UUID} ${SHORT_ID} ${SNI} ${HTTP_USERNAME} ${HTTP_PASSWORD}" 2>&1)
     REMOTE_STATUS=$?
     set -e
 
@@ -130,7 +136,7 @@ while [[ $ATTEMPT -le $MAX_ATTEMPTS ]]; do
         SUCCESS=1
         break
     elif grep -q "SINGBOX_SETUP_PORT_TAKEN" <<<"$REMOTE_OUTPUT"; then
-        echo "==> Port ${PORT} is already taken on the remote host, trying another..."
+        echo "==> One of the selected ports is already taken on the remote host, trying another pair..."
         ATTEMPT=$((ATTEMPT + 1))
         continue
     else
@@ -150,12 +156,15 @@ if [[ -z "$PUBLIC_KEY" ]]; then
     exit 1
 fi
 
-echo "==> sing-box installed and running on ${SSH_HOST}:${PORT}"
+echo "==> sing-box installed and running on ${SSH_HOST}:${PORT} (VLESS) and ${SSH_HOST}:${HTTP_PORT} (HTTP proxy)"
 
 mkdir -p "$SERVER_DIR"
 cat > "${SERVER_DIR}/info.env" <<EOF
 HOST=${SSH_HOST}
 PORT=${PORT}
+HTTP_PORT=${HTTP_PORT}
+HTTP_USERNAME=${HTTP_USERNAME}
+HTTP_PASSWORD=${HTTP_PASSWORD}
 UUID=${UUID}
 SHORT_ID=${SHORT_ID}
 SNI=${SNI}
@@ -179,6 +188,8 @@ cp "${SERVER_DIR}/client-config.json" "${SCRIPT_DIR}/examples/docker-client/conf
 
 VLESS_URI="vless://${UUID}@${SSH_HOST}:${PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp#${ALIAS}"
 echo "${VLESS_URI}" > "${SERVER_DIR}/vless.txt"
+HTTP_PROXY_URI="http://${HTTP_USERNAME}:${HTTP_PASSWORD}@${SSH_HOST}:${HTTP_PORT}"
+echo "${HTTP_PROXY_URI}" > "${SERVER_DIR}/http-proxy.txt"
 
 echo ""
 echo "==> Done. Server info saved to ${SERVER_DIR}/"
@@ -189,6 +200,12 @@ echo "    UUID:       ${UUID}"
 echo "    SNI:        ${SNI}"
 echo "    Public key: ${PUBLIC_KEY}"
 echo "    Short ID:   ${SHORT_ID}"
+echo ""
+echo "    Password-authenticated HTTP proxy:"
+echo "    ${HTTP_PROXY_URI}"
+echo "    Saved to: ${SERVER_DIR}/http-proxy.txt"
+echo "    Warning: HTTP proxy traffic and its password are unencrypted in transit."
+echo "    Use it only on a trusted network; use the VLESS link below when encryption is needed."
 echo ""
 echo "    vless:// link (import into v2rayN/NekoBox/Shadowrocket/etc.):"
 echo "    ${VLESS_URI}"

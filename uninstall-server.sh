@@ -75,14 +75,14 @@ parse_ssh_command "$SSH_COMMAND"
 build_ssh_args
 build_scp_args
 
-echo "==> Removing sing-box from ${SSH_USER}@${SSH_HOST}:${PORT}..."
+echo "==> Removing sing-box from ${SSH_USER}@${SSH_HOST}:${PORT} (VLESS) and ${SSH_HOST}:${HTTP_PORT:-unknown} (HTTP proxy)..."
 
 ssh "${SSH_ARGS[@]}" "mkdir -p /tmp/singbox-setup"
 scp "${SCP_ARGS[@]}" "${SCRIPT_DIR}/lib/remote_uninstall.sh" "${SSH_USER}@${SSH_HOST}:/tmp/singbox-setup/"
 
-UNINSTALL_ARGS="${PORT}"
+UNINSTALL_ARGS="${PORT} ${HTTP_PORT:-}"
 if [[ "$PURGE_BINARY" -eq 1 ]]; then
-    UNINSTALL_ARGS="${PORT} --purge-binary"
+    UNINSTALL_ARGS="${UNINSTALL_ARGS} --purge-binary"
 fi
 
 set +e

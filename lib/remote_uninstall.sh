@@ -5,14 +5,18 @@
 # sing-box binary itself is left in place by default (it's harmless and
 # shared across reinstalls) unless --purge-binary is passed.
 #
-# Usage: remote_uninstall.sh <port> [--purge-binary]
+# Usage: remote_uninstall.sh <vless_port> [http_port] [--purge-binary]
 
 set -euo pipefail
 
-PORT="${1:?usage: remote_uninstall.sh <port> [--purge-binary]}"
+PORT="${1:?usage: remote_uninstall.sh <vless_port> [http_port] [--purge-binary]}"
+HTTP_PORT="${2:-}"
 PURGE_BINARY=0
-if [[ "${2:-}" == "--purge-binary" ]]; then
+if [[ "${2:-}" == "--purge-binary" || "${3:-}" == "--purge-binary" ]]; then
     PURGE_BINARY=1
+fi
+if [[ "$HTTP_PORT" == "--purge-binary" ]]; then
+    HTTP_PORT=""
 fi
 
 INSTALL_BIN="/usr/local/bin/sing-box"
@@ -36,7 +40,10 @@ $SUDO systemctl daemon-reload
 if command -v ufw >/dev/null 2>&1 && $SUDO ufw status 2>/dev/null | grep -q "Status: active"; then
     $SUDO ufw delete allow "${PORT}/tcp" >/dev/null 2>&1 || true
     $SUDO ufw delete allow "${PORT}/udp" >/dev/null 2>&1 || true
-    echo "ufw: closed port ${PORT} (tcp+udp)"
+    if [[ -n "$HTTP_PORT" ]]; then
+        $SUDO ufw delete allow "${HTTP_PORT}/tcp" >/dev/null 2>&1 || true
+    fi
+    echo "ufw: closed VLESS port ${PORT} (tcp+udp)${HTTP_PORT:+ and HTTP proxy port ${HTTP_PORT} (tcp)}"
 fi
 
 if [[ "$PURGE_BINARY" -eq 1 ]]; then

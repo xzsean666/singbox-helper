@@ -27,6 +27,18 @@
           "short_id": ["{{SHORT_ID}}"]
         }
       }
+    },
+    {
+      "type": "http",
+      "tag": "http-in",
+      "listen": "::",
+      "listen_port": {{HTTP_PORT}},
+      "users": [
+        {
+          "username": "{{HTTP_USERNAME}}",
+          "password": "{{HTTP_PASSWORD}}"
+        }
+      ]
     }
   ],
   "outbounds": [

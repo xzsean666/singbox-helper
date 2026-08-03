@@ -2,7 +2,8 @@
 
 Give it an ssh login command for a server, and it installs and configures a
 [sing-box](https://sing-box.sagernet.org) **VLESS + Reality** proxy server
-there. Includes a ready-to-run docker-compose example showing how a container
+there, plus a password-authenticated HTTP proxy on a separate port. Includes a
+ready-to-run docker-compose example showing how a container
 on a *different* server can use that proxy to reach the internet.
 
 VLESS + Reality was chosen over plain Shadowsocks for its resistance to active
@@ -34,7 +35,8 @@ prompt won't work non-interactively.
 
 This will:
 1. Parse the ssh command you gave it (identity file, user, host, port).
-2. Generate a random high port (never 80/443), a UUID, and a Reality short ID.
+2. Generate separate random high ports (never 80/443) for VLESS and the HTTP
+   proxy, plus a UUID, Reality short ID, and HTTP proxy password.
 3. Install sing-box on the remote host (downloads the latest release binary
    if it's not already installed), generate a Reality keypair **on the
    server itself** (the private key never leaves it), write the config, and
@@ -58,15 +60,22 @@ choices are `www.apple.com`, `www.samsung.com`, or `addons.mozilla.org`.
 Each server's details are saved under `servers/<alias>/` (gitignored - these
 are credentials, not something to commit):
 
-- `info.env` - host, port, UUID, short ID, SNI, public key, and the ssh
-  command used
+- `info.env` - host, ports, VLESS credentials, HTTP proxy credentials, and the
+  ssh command used
 - `client-config.json` - a ready sing-box **client** config pointing at it
+- `http-proxy.txt` - a ready-to-use `http://username:password@host:port` URL
 
 The setup script also prints a `vless://...` link you can import directly
-into GUI clients (v2rayN, NekoBox, Shadowrocket, etc.).
+into GUI clients (v2rayN, NekoBox, Shadowrocket, etc.), and a directly usable
+password-authenticated HTTP proxy URL.
+
+The HTTP proxy uses plain HTTP proxy authentication, so the password and proxy
+traffic are not encrypted between your device and the server. Use it only on a
+trusted network. For encrypted traffic, use the generated VLESS + Reality link.
 
 Re-running against an alias that already exists is refused unless you pass
-`--force` (which regenerates a new port/UUID/keys and reinstalls).
+`--force` (which regenerates new ports, VLESS credentials, and HTTP proxy
+credentials before reinstalling).
 
 ### Reinstalling
 
@@ -77,9 +86,9 @@ Re-running against an alias that already exists is refused unless you pass
 
 Reuses the ssh command already saved in `servers/myserver/info.env`, so you
 don't have to type it again. Equivalent to running `setup-server.sh` with
-`--force` against that saved ssh command; regenerates the port/UUID/keys and
-overwrites the existing service. Pass `--sni` to switch the camouflage
-domain, otherwise the existing one is kept.
+`--force` against that saved ssh command; regenerates the ports and VLESS/HTTP
+proxy credentials and overwrites the existing service. Pass `--sni` to switch
+the camouflage domain, otherwise the existing one is kept.
 
 ### Uninstalling
 
@@ -90,9 +99,9 @@ domain, otherwise the existing one is kept.
 ```
 
 Stops and removes the `sing-box` systemd service and its config from the
-remote host, closes the port in `ufw` if it was opened there, and deletes
-the local `servers/myserver/` directory. Prompts for confirmation unless
-`--yes` is passed. The `sing-box` binary itself is left on the remote host
+remote host, closes the VLESS and HTTP proxy ports in `ufw` if they were opened
+there, and deletes the local `servers/myserver/` directory. Prompts for
+confirmation unless `--yes` is passed. The `sing-box` binary itself is left on the remote host
 (harmless, and shared across reinstalls) unless `--purge-binary` is given.
 
 ## Using the proxy from docker (on any other server)

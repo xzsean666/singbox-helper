@@ -4,7 +4,7 @@
 # /tmp/singbox-setup/sing-box.service to already have been uploaded alongside
 # this script.
 #
-# Usage: remote_install.sh <port> <uuid> <short_id> <sni>
+# Usage: remote_install.sh <vless_port> <http_port> <uuid> <short_id> <sni> <http_username> <http_password>
 #
 # The Reality keypair is generated HERE (not on the local machine) because it
 # requires the sing-box binary itself - the private key never leaves this
@@ -18,10 +18,13 @@
 
 set -euo pipefail
 
-PORT="${1:?usage: remote_install.sh <port> <uuid> <short_id> <sni>}"
-UUID="${2:?usage: remote_install.sh <port> <uuid> <short_id> <sni>}"
-SHORT_ID="${3:?usage: remote_install.sh <port> <uuid> <short_id> <sni>}"
-SNI="${4:?usage: remote_install.sh <port> <uuid> <short_id> <sni>}"
+PORT="${1:?usage: remote_install.sh <vless_port> <http_port> <uuid> <short_id> <sni> <http_username> <http_password>}"
+HTTP_PORT="${2:?usage: remote_install.sh <vless_port> <http_port> <uuid> <short_id> <sni> <http_username> <http_password>}"
+UUID="${3:?usage: remote_install.sh <vless_port> <http_port> <uuid> <short_id> <sni> <http_username> <http_password>}"
+SHORT_ID="${4:?usage: remote_install.sh <vless_port> <http_port> <uuid> <short_id> <sni> <http_username> <http_password>}"
+SNI="${5:?usage: remote_install.sh <vless_port> <http_port> <uuid> <short_id> <sni> <http_username> <http_password>}"
+HTTP_USERNAME="${6:?usage: remote_install.sh <vless_port> <http_port> <uuid> <short_id> <sni> <http_username> <http_password>}"
+HTTP_PASSWORD="${7:?usage: remote_install.sh <vless_port> <http_port> <uuid> <short_id> <sni> <http_username> <http_password>}"
 
 SETUP_DIR="/tmp/singbox-setup"
 INSTALL_BIN="/usr/local/bin/sing-box"
@@ -35,13 +38,16 @@ else
 fi
 
 port_is_listening() {
-    command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${PORT}\$"
+    local candidate_port="$1"
+    command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${candidate_port}\$"
 }
 
-if port_is_listening; then
-    echo "SINGBOX_SETUP_PORT_TAKEN PORT=${PORT}" >&2
-    exit 75
-fi
+for candidate_port in "$PORT" "$HTTP_PORT"; do
+    if port_is_listening "$candidate_port"; then
+        echo "SINGBOX_SETUP_PORT_TAKEN PORT=${candidate_port}" >&2
+        exit 75
+    fi
+done
 
 if [[ "$(uname -s)" != "Linux" ]]; then
     echo "remote_install.sh: only Linux targets are supported" >&2
@@ -113,6 +119,9 @@ if [[ -z "$PRIVATE_KEY" || -z "$PUBLIC_KEY" ]]; then
 fi
 
 sed -e "s|{{PORT}}|${PORT}|g" \
+    -e "s|{{HTTP_PORT}}|${HTTP_PORT}|g" \
+    -e "s|{{HTTP_USERNAME}}|${HTTP_USERNAME}|g" \
+    -e "s|{{HTTP_PASSWORD}}|${HTTP_PASSWORD}|g" \
     -e "s|{{UUID}}|${UUID}|g" \
     -e "s|{{SHORT_ID}}|${SHORT_ID}|g" \
     -e "s|{{SNI}}|${SNI}|g" \
@@ -126,9 +135,10 @@ $SUDO cp "${SETUP_DIR}/sing-box.service" "$SERVICE_FILE"
 if command -v ufw >/dev/null 2>&1 && $SUDO ufw status 2>/dev/null | grep -q "Status: active"; then
     $SUDO ufw allow "${PORT}/tcp" >/dev/null
     $SUDO ufw allow "${PORT}/udp" >/dev/null
-    echo "ufw: opened port ${PORT} (tcp+udp)"
+    $SUDO ufw allow "${HTTP_PORT}/tcp" >/dev/null
+    echo "ufw: opened VLESS port ${PORT} (tcp+udp) and HTTP proxy port ${HTTP_PORT} (tcp)"
 else
-    echo "NOTE: no active ufw firewall detected - if this server uses something else (firewalld, a cloud security group, etc.) open port ${PORT}/tcp+udp manually"
+    echo "NOTE: no active ufw firewall detected - if this server uses something else (firewalld, a cloud security group, etc.) open VLESS port ${PORT}/tcp+udp and HTTP proxy port ${HTTP_PORT}/tcp manually"
 fi
 
 $SUDO systemctl daemon-reload
@@ -143,10 +153,12 @@ if ! $SUDO systemctl is-active --quiet sing-box; then
     exit 1
 fi
 
-if ! port_is_listening; then
-    echo "remote_install.sh: sing-box is active but not listening on port ${PORT}" >&2
-    exit 1
-fi
+for candidate_port in "$PORT" "$HTTP_PORT"; do
+    if ! port_is_listening "$candidate_port"; then
+        echo "remote_install.sh: sing-box is active but not listening on port ${candidate_port}" >&2
+        exit 1
+    fi
+done
 
-echo "SINGBOX_SETUP_OK PORT=${PORT}"
+echo "SINGBOX_SETUP_OK PORT=${PORT} HTTP_PORT=${HTTP_PORT}"
 echo "SINGBOX_PUBLIC_KEY=${PUBLIC_KEY}"
