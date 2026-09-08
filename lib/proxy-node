@@ -1,0 +1,1244 @@
+#!/usr/bin/env python3
+"""
+CLI tool to view and switch sing-box proxy nodes via Clash API.
+Installed as /usr/local/bin/proxy-node (alias: pnode).
+"""
+
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+API_URL = "http://127.0.0.1:9090"
+PROXY_TAG = "proxy"
+CONFIG_PATH = "/etc/sing-box-client/config.json"
+SUB_URL_PATH = "/etc/sing-box-client/sub_url.txt"
+PROFILES_DIR = "/etc/sing-box-client/profiles"
+CURRENT_PROFILE_PATH = "/etc/sing-box-client/current_profile.txt"
+PORT_HTTP = 1080
+
+COLOR_GREEN = "\033[32m"
+COLOR_YELLOW = "\033[33m"
+COLOR_CYAN = "\033[36m"
+COLOR_RED = "\033[31m"
+COLOR_BOLD = "\033[1m"
+COLOR_RESET = "\033[0m"
+
+
+def get_sing_box_binary():
+    b = shutil.which("sing-box")
+    if b:
+        return b
+    if os.path.exists("/usr/local/bin/sing-box"):
+        return "/usr/local/bin/sing-box"
+    return None
+
+
+def get_converter_path():
+    candidates = [
+        "/etc/sing-box-client/sub_converter.py",
+        "/usr/local/lib/singbox-client/sub_converter.py",
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "sub_converter.py"),
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+    return None
+
+
+def ensure_profiles_dir():
+    try:
+        os.makedirs(PROFILES_DIR, exist_ok=True)
+    except Exception:
+        pass
+
+
+def get_current_profile_name():
+    if os.path.exists(CURRENT_PROFILE_PATH):
+        try:
+            with open(CURRENT_PROFILE_PATH, "r", encoding="utf-8") as f:
+                name = f.read().strip()
+                if name:
+                    return name
+        except Exception:
+            pass
+    return None
+
+
+def set_current_profile_name(name):
+    try:
+        ensure_profiles_dir()
+        if name:
+            with open(CURRENT_PROFILE_PATH, "w", encoding="utf-8") as f:
+                f.write(name.strip() + "\n")
+        else:
+            if os.path.exists(CURRENT_PROFILE_PATH):
+                os.remove(CURRENT_PROFILE_PATH)
+    except Exception as e:
+        print(f"Warning: could not write {CURRENT_PROFILE_PATH}: {e}")
+
+
+def inspect_config_file(filepath):
+    """
+    Inspects a sing-box config file and returns (node_count, nodes_list, selector_tag)
+    """
+    node_count = 0
+    nodes = []
+    selector_tag = ""
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+        outbounds = cfg.get("outbounds", [])
+        for ob in outbounds:
+            if ob.get("type") == "selector":
+                selector_tag = ob.get("tag", "proxy")
+                nodes = ob.get("outbounds", [])
+                node_count = len(nodes)
+                break
+        if node_count == 0:
+            proxy_obs = [ob for ob in outbounds if ob.get("type") not in ("selector", "direct", "block", "dns")]
+            node_count = len(proxy_obs)
+            nodes = [ob.get("tag", "") for ob in proxy_obs]
+    except Exception:
+        pass
+    return node_count, nodes, selector_tag
+
+
+def save_profile(name, config_source_path, ptype="Custom", source=""):
+    ensure_profiles_dir()
+    if not re.match(r'^[a-zA-Z0-9_\-]+$', name):
+        print(f"{COLOR_RED}[✗] Invalid profile name '{name}'. Use letters, numbers, hyphens, underscores.{COLOR_RESET}")
+        return False
+
+    dest_json = os.path.join(PROFILES_DIR, f"{name}.json")
+    dest_meta = os.path.join(PROFILES_DIR, f"{name}.meta.json")
+
+    # Validate config
+    check_bin = get_sing_box_binary()
+    if check_bin:
+        res = subprocess.run([check_bin, "check", "-c", config_source_path], capture_output=True, text=True)
+        if res.returncode != 0:
+            print(f"{COLOR_RED}[✗] Invalid sing-box configuration:{COLOR_RESET}\n{res.stderr or res.stdout}")
+            return False
+
+    shutil.copy2(config_source_path, dest_json)
+    try:
+        os.chmod(dest_json, 0o644)
+    except Exception:
+        pass
+
+    node_count, _, _ = inspect_config_file(dest_json)
+
+    meta = {
+        "name": name,
+        "type": ptype,
+        "source": source,
+        "node_count": node_count,
+        "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    try:
+        with open(dest_meta, "w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=2)
+    except Exception:
+        pass
+
+    return True
+
+
+def auto_init_current_profile_if_needed():
+    ensure_profiles_dir()
+    if not os.path.exists(CONFIG_PATH):
+        return
+    if not os.path.exists(PROFILES_DIR):
+        return
+    existing = [f for f in os.listdir(PROFILES_DIR) if f.endswith(".json") and not f.endswith(".meta.json")]
+    if not existing:
+        profile_name = "default"
+        source = ""
+        ptype = "Custom"
+        if os.path.exists(SUB_URL_PATH):
+            try:
+                with open(SUB_URL_PATH, "r", encoding="utf-8") as f:
+                    source = f.read().strip()
+                if source:
+                    profile_name = "clash-sub"
+                    ptype = "subscription"
+            except Exception:
+                pass
+        save_profile(profile_name, CONFIG_PATH, ptype=ptype, source=source)
+        set_current_profile_name(profile_name)
+
+
+def list_profiles():
+    ensure_profiles_dir()
+    current_name = get_current_profile_name()
+    profiles = []
+    if not os.path.exists(PROFILES_DIR):
+        return profiles
+
+    for fname in os.listdir(PROFILES_DIR):
+        if fname.endswith(".json") and not fname.endswith(".meta.json"):
+            p_name = fname[:-5]
+            json_path = os.path.join(PROFILES_DIR, fname)
+            meta_path = os.path.join(PROFILES_DIR, f"{p_name}.meta.json")
+
+            mtime = os.path.getmtime(json_path)
+            mtime_str = time.strftime("%Y-%m-%d %H:%M", time.localtime(mtime))
+            node_count, _, _ = inspect_config_file(json_path)
+            ptype = "Custom"
+            source = ""
+
+            if os.path.exists(meta_path):
+                try:
+                    with open(meta_path, "r", encoding="utf-8") as f:
+                        meta = json.load(f)
+                    ptype = meta.get("type", ptype)
+                    source = meta.get("source", source)
+                    if "node_count" in meta and meta["node_count"]:
+                        node_count = meta["node_count"]
+                except Exception:
+                    pass
+            else:
+                if node_count > 1:
+                    ptype = "subscription"
+                elif node_count == 1:
+                    ptype = "vless"
+
+            is_active = (p_name == current_name)
+            profiles.append({
+                "name": p_name,
+                "path": json_path,
+                "meta_path": meta_path,
+                "type": ptype,
+                "source": source,
+                "node_count": node_count,
+                "mtime": mtime,
+                "mtime_str": mtime_str,
+                "is_active": is_active,
+            })
+
+    profiles.sort(key=lambda x: x["name"].lower())
+    return profiles
+
+
+def resolve_profile(target, profiles):
+    if not target:
+        return None
+    target_str = str(target).strip()
+    if target_str.isdigit():
+        idx = int(target_str) - 1
+        if 0 <= idx < len(profiles):
+            return profiles[idx]
+        return None
+    # Exact match
+    for p in profiles:
+        if p["name"].lower() == target_str.lower():
+            return p
+    # Substring match
+    matches = [p for p in profiles if target_str.lower() in p["name"].lower()]
+    if len(matches) == 1:
+        return matches[0]
+    elif len(matches) > 1:
+        print(f"{COLOR_YELLOW}[!] Multiple profiles match '{target}':{COLOR_RESET}")
+        for m in matches:
+            print(f"  - {m['name']}")
+        return "multiple"
+    return None
+
+
+
+def wait_for_api(max_wait=5):
+    start = time.time()
+    while time.time() - start < max_wait:
+        try:
+            req = urllib.request.Request(f"{API_URL}/proxies", headers={"User-Agent": "proxy-node/1.0"})
+            with urllib.request.urlopen(req, timeout=1) as resp:
+                if resp.status == 200:
+                    return True
+        except Exception:
+            time.sleep(0.3)
+    return False
+
+
+def get_proxies():
+    req = urllib.request.Request(f"{API_URL}/proxies", headers={"User-Agent": "proxy-node/1.0"})
+    with urllib.request.urlopen(req, timeout=3) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def get_current_selector():
+    req = urllib.request.Request(f"{API_URL}/proxies/{PROXY_TAG}", headers={"User-Agent": "proxy-node/1.0"})
+    with urllib.request.urlopen(req, timeout=3) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def set_proxy(node_name):
+    data = json.dumps({"name": node_name}).encode("utf-8")
+    req = urllib.request.Request(
+        f"{API_URL}/proxies/{PROXY_TAG}",
+        data=data,
+        headers={"Content-Type": "application/json", "User-Agent": "proxy-node/1.0"},
+        method="PUT",
+    )
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        return resp.status in (200, 204)
+
+
+def cmd_list(args):
+    try:
+        data = get_proxies()
+        proxies_map = data.get("proxies", {})
+        selector = proxies_map.get(PROXY_TAG, {})
+        if not selector:
+            # Maybe selector has a different tag
+            for k, v in proxies_map.items():
+                if v.get("type") == "Selector":
+                    selector = v
+                    break
+        now_node = selector.get("now", "")
+        all_nodes = selector.get("all", [])
+
+        if not all_nodes:
+            print(f"{COLOR_YELLOW}[!] No outbounds found in selector '{PROXY_TAG}'.{COLOR_RESET}")
+            return
+
+        active_prof = get_current_profile_name()
+        prof_header = f" (Profile: {active_prof})" if active_prof else ""
+        print(f"\n{COLOR_BOLD}{COLOR_CYAN}=== Available Proxy Nodes ({len(all_nodes)} total){prof_header} ==={COLOR_RESET}")
+        print("-" * 68)
+        print(f" {'#':<4} {'Type':<12} {'Status':<12} {'Node Name'}")
+        print("-" * 68)
+        for idx, name in enumerate(all_nodes, 1):
+            info = proxies_map.get(name, {})
+            ntype = info.get("type", "Proxy")
+            if name == now_node:
+                status = "[*] Active"
+                print(f" {COLOR_GREEN}{idx:<4} {ntype:<12} {status:<12} {name}{COLOR_RESET}")
+            else:
+                status = ""
+                print(f" {idx:<4} {ntype:<12} {status:<12} {name}")
+        print("-" * 68)
+        print(f"Current active node: {COLOR_GREEN}{COLOR_BOLD}{now_node}{COLOR_RESET}")
+        print(f"Switch node:    {COLOR_CYAN}pnode switch <number|name>{COLOR_RESET}  (or: {COLOR_CYAN}pnode <number>{COLOR_RESET})")
+        print(f"Switch profile: {COLOR_CYAN}pnode profile use <name|#>{COLOR_RESET}  (or: {COLOR_CYAN}pnode profiles{COLOR_RESET})\n")
+    except Exception as e:
+        print(f"{COLOR_YELLOW}[!] Cannot connect to sing-box Clash API (127.0.0.1:9090): {e}{COLOR_RESET}")
+        if os.path.exists(CONFIG_PATH):
+            try:
+                with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                outbounds = cfg.get("outbounds", [])
+                print(f"{COLOR_CYAN}Nodes listed in {CONFIG_PATH}:{COLOR_RESET}")
+                idx = 1
+                for ob in outbounds:
+                    if ob.get("type") not in ("selector", "direct", "block", "dns"):
+                        print(f" {idx:<4} {ob.get('type', ''):<12} {ob.get('tag', '')}")
+                        idx += 1
+            except Exception:
+                pass
+        print("Please check if sing-box-client is running: systemctl status sing-box-client")
+
+
+def cmd_switch(args):
+    target = args.node
+    try:
+        selector = get_current_selector()
+        all_nodes = selector.get("all", [])
+        if not all_nodes:
+            print(f"{COLOR_RED}[✗] No nodes available to select.{COLOR_RESET}")
+            return 1
+
+        if not target:
+            # Interactive selection if stdin is tty
+            if sys.stdin.isatty():
+                cmd_list(args)
+                try:
+                    choice = input(f"{COLOR_BOLD}Enter node number to switch [1-{len(all_nodes)}]: {COLOR_RESET}").strip()
+                    if not choice:
+                        print("Cancelled.")
+                        return 0
+                    target = choice
+                except (KeyboardInterrupt, EOFError):
+                    print("\nCancelled.")
+                    return 0
+            else:
+                print("Usage: proxy-node switch <number|name>")
+                return 1
+
+        target_node = None
+        if target.isdigit():
+            idx = int(target) - 1
+            if 0 <= idx < len(all_nodes):
+                target_node = all_nodes[idx]
+            else:
+                print(f"{COLOR_RED}[✗] Index out of range. Please enter 1 to {len(all_nodes)}.{COLOR_RESET}")
+                return 1
+        else:
+            # Match by exact name or case-insensitive prefix
+            for name in all_nodes:
+                if name.lower() == target.lower():
+                    target_node = name
+                    break
+            if not target_node:
+                # Partial match
+                matches = [name for name in all_nodes if target.lower() in name.lower()]
+                if len(matches) == 1:
+                    target_node = matches[0]
+                elif len(matches) > 1:
+                    print(f"{COLOR_YELLOW}[!] Multiple nodes match '{target}':{COLOR_RESET}")
+                    for m in matches:
+                        print(f"  - {m}")
+                    return 1
+                else:
+                    print(f"{COLOR_RED}[✗] Node '{target}' not found.{COLOR_RESET}")
+                    return 1
+
+        set_proxy(target_node)
+        print(f"{COLOR_GREEN}[✓] Successfully switched to node: {COLOR_BOLD}{target_node}{COLOR_RESET}")
+        return 0
+    except Exception as e:
+        print(f"{COLOR_RED}[✗] Failed to switch node: {e}{COLOR_RESET}")
+        return 1
+
+
+def cmd_current(args):
+    try:
+        selector = get_current_selector()
+        print(selector.get("now", "unknown"))
+    except Exception as e:
+        print(f"unknown ({e})")
+
+
+def cmd_test(args):
+    print("Testing connection through 127.0.0.1:1080 ...")
+    start = time.time()
+    try:
+        proxy_handler = urllib.request.ProxyHandler({
+            "http": f"http://127.0.0.1:{PORT_HTTP}",
+            "https": f"http://127.0.0.1:{PORT_HTTP}",
+        })
+        opener = urllib.request.build_opener(proxy_handler)
+        req = urllib.request.Request("https://api.ipify.org?format=json", headers={"User-Agent": "curl/7.81.0"})
+        with opener.open(req, timeout=6) as resp:
+            elapsed = int((time.time() - start) * 1000)
+            res = json.loads(resp.read().decode())
+            ip = res.get("ip", "")
+            print(f"{COLOR_GREEN}[✓] Connection successful!{COLOR_RESET}")
+            print(f"    Outbound IP: {COLOR_BOLD}{ip}{COLOR_RESET}")
+            print(f"    Latency:     {elapsed} ms")
+    except Exception as e:
+        print(f"{COLOR_RED}[✗] Proxy test failed: {e}{COLOR_RESET}")
+        return 1
+
+
+def cmd_profile_list(args=None):
+    auto_init_current_profile_if_needed()
+    profiles = list_profiles()
+    current_name = get_current_profile_name()
+
+    if not profiles:
+        print(f"\n{COLOR_YELLOW}[!] No saved config profiles found in {PROFILES_DIR}.{COLOR_RESET}")
+        print(f"Save current config using: {COLOR_CYAN}pnode profile save <name>{COLOR_RESET}\n")
+        return
+
+    print(f"\n{COLOR_BOLD}{COLOR_CYAN}=== Configured Proxy Profiles ({len(profiles)} total) ==={COLOR_RESET}")
+    print("-" * 84)
+    print(f" {'#':<4} {'Status':<12} {'Profile Name':<18} {'Nodes':<8} {'Type':<14} {'Source / Date'}")
+    print("-" * 84)
+    for idx, p in enumerate(profiles, 1):
+        status_str = f"{COLOR_GREEN}[*] Active{COLOR_RESET}" if p["name"] == current_name else ""
+        source_display = p["source"]
+        if source_display:
+            if len(source_display) > 28:
+                source_display = source_display[:25] + "..."
+            info_str = f"{source_display} ({p['mtime_str']})"
+        else:
+            info_str = p["mtime_str"]
+
+        p_name = p["name"]
+        ptype_display = p["type"].capitalize()
+        if p["name"] == current_name:
+            print(f" {COLOR_GREEN}{idx:<4} {status_str:<21} {COLOR_BOLD}{p_name:<18}{COLOR_RESET} {p['node_count']:<8} {ptype_display:<14} {info_str}")
+        else:
+            print(f" {idx:<4} {'':<12} {p_name:<18} {p['node_count']:<8} {ptype_display:<14} {info_str}")
+    print("-" * 84)
+    if current_name:
+        print(f"Current active profile: {COLOR_GREEN}{COLOR_BOLD}{current_name}{COLOR_RESET}")
+    else:
+        print(f"Current active profile: {COLOR_YELLOW}custom / unnamed{COLOR_RESET}")
+    print(f"\nProfile Commands:")
+    print(f"  Switch:   {COLOR_CYAN}pnode profile use <name|#>{COLOR_RESET}  (alias: {COLOR_CYAN}pnode config use <name|#>{COLOR_RESET})")
+    print(f"  Delete:   {COLOR_CYAN}pnode profile del <name|#>{COLOR_RESET}  (alias: {COLOR_CYAN}pnode config del <name|#>{COLOR_RESET})")
+    print(f"  Save:     {COLOR_CYAN}pnode profile save <name>{COLOR_RESET}")
+    print(f"  Add:      {COLOR_CYAN}pnode profile add <name> <url|vless|file>{COLOR_RESET}\n")
+
+
+def cmd_profile_use(target):
+    auto_init_current_profile_if_needed()
+    profiles = list_profiles()
+    if not profiles:
+        print(f"{COLOR_RED}[✗] No profiles found.{COLOR_RESET}")
+        return 1
+
+    if not target:
+        if sys.stdin.isatty():
+            cmd_profile_list()
+            try:
+                choice = input(f"{COLOR_BOLD}Enter profile number or name to switch [1-{len(profiles)}]: {COLOR_RESET}").strip()
+                if not choice:
+                    print("Cancelled.")
+                    return 0
+                target = choice
+            except (KeyboardInterrupt, EOFError):
+                print("\nCancelled.")
+                return 0
+        else:
+            print("Usage: pnode profile use <name|number>")
+            return 1
+
+    prof = resolve_profile(target, profiles)
+    if prof == "multiple":
+        return 1
+    if not prof:
+        print(f"{COLOR_RED}[✗] Profile '{target}' not found. Run 'pnode profile list' to see available profiles.{COLOR_RESET}")
+        return 1
+
+    target_name = prof["name"]
+    target_json = prof["path"]
+    meta_path = prof["meta_path"]
+
+    check_bin = get_sing_box_binary()
+    if check_bin:
+        res = subprocess.run([check_bin, "check", "-c", target_json], capture_output=True, text=True)
+        if res.returncode != 0:
+            print(f"{COLOR_RED}[✗] Profile '{target_name}' failed sing-box validation:{COLOR_RESET}\n{res.stderr or res.stdout}")
+            return 1
+
+    if os.path.exists(CONFIG_PATH):
+        try:
+            shutil.copy2(CONFIG_PATH, f"{CONFIG_PATH}.bak")
+        except Exception:
+            pass
+
+    try:
+        shutil.copy2(target_json, CONFIG_PATH)
+        os.chmod(CONFIG_PATH, 0o644)
+    except Exception as e:
+        print(f"{COLOR_RED}[✗] Failed to apply profile config: {e}{COLOR_RESET}")
+        return 1
+
+    if os.path.exists(meta_path):
+        try:
+            with open(meta_path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+            if meta.get("type") in ("subscription", "Subscription") and meta.get("source", "").startswith("http"):
+                with open(SUB_URL_PATH, "w", encoding="utf-8") as f:
+                    f.write(meta["source"].strip() + "\n")
+            else:
+                if os.path.exists(SUB_URL_PATH):
+                    os.remove(SUB_URL_PATH)
+        except Exception:
+            pass
+    else:
+        if os.path.exists(SUB_URL_PATH):
+            os.remove(SUB_URL_PATH)
+
+    set_current_profile_name(target_name)
+
+    print(f"Applying profile '{COLOR_BOLD}{target_name}{COLOR_RESET}' and restarting sing-box-client...")
+    subprocess.run(["systemctl", "restart", "sing-box-client"])
+    wait_for_api(5)
+
+    res = subprocess.run(["systemctl", "is-active", "--quiet", "sing-box-client"])
+    if res.returncode != 0:
+        print(f"{COLOR_RED}[✗] sing-box-client failed to start with profile '{target_name}'. Rolling back...{COLOR_RESET}")
+        if os.path.exists(f"{CONFIG_PATH}.bak"):
+            shutil.copy2(f"{CONFIG_PATH}.bak", CONFIG_PATH)
+            subprocess.run(["systemctl", "restart", "sing-box-client"])
+        return 1
+
+    print(f"{COLOR_GREEN}[✓] Successfully switched to profile: {COLOR_BOLD}{target_name}{COLOR_RESET}")
+    cmd_list(None)
+    return 0
+
+
+def cmd_profile_del(target, force=False):
+    profiles = list_profiles()
+    if not profiles:
+        print(f"{COLOR_YELLOW}[!] No profiles found.{COLOR_RESET}")
+        return 0
+
+    if not target:
+        if sys.stdin.isatty():
+            cmd_profile_list()
+            try:
+                choice = input(f"{COLOR_BOLD}Enter profile number or name to delete [1-{len(profiles)}]: {COLOR_RESET}").strip()
+                if not choice:
+                    print("Cancelled.")
+                    return 0
+                target = choice
+            except (KeyboardInterrupt, EOFError):
+                print("\nCancelled.")
+                return 0
+        else:
+            print("Usage: pnode profile del <name|number>")
+            return 1
+
+    prof = resolve_profile(target, profiles)
+    if prof == "multiple":
+        return 1
+    if not prof:
+        print(f"{COLOR_RED}[✗] Profile '{target}' not found.{COLOR_RESET}")
+        return 1
+
+    target_name = prof["name"]
+    is_active = prof["is_active"]
+
+    if is_active:
+        print(f"{COLOR_YELLOW}[!] Note: Profile '{target_name}' is currently ACTIVE.{COLOR_RESET}")
+        print(f"    Deleting it removes the saved profile record. sing-box-client continues running the current config until you switch profiles.")
+
+    if not force and sys.stdin.isatty():
+        try:
+            confirm = input(f"Are you sure you want to delete profile '{COLOR_BOLD}{target_name}{COLOR_RESET}'? [y/N]: ").strip().lower()
+            if confirm not in ("y", "yes"):
+                print("Deletion cancelled.")
+                return 0
+        except (KeyboardInterrupt, EOFError):
+            print("\nDeletion cancelled.")
+            return 0
+
+    if os.path.exists(prof["path"]):
+        os.remove(prof["path"])
+    if os.path.exists(prof["meta_path"]):
+        os.remove(prof["meta_path"])
+
+    if is_active:
+        set_current_profile_name(None)
+
+    print(f"{COLOR_GREEN}[✓] Successfully deleted profile: {COLOR_BOLD}{target_name}{COLOR_RESET}")
+    return 0
+
+
+def cmd_profile_save(name):
+    if not name:
+        if sys.stdin.isatty():
+            try:
+                name = input(f"{COLOR_BOLD}Enter name for current profile: {COLOR_RESET}").strip()
+                if not name:
+                    print("Cancelled.")
+                    return 0
+            except (KeyboardInterrupt, EOFError):
+                print("\nCancelled.")
+                return 0
+        else:
+            print("Usage: pnode profile save <name>")
+            return 1
+
+    if not os.path.exists(CONFIG_PATH):
+        print(f"{COLOR_RED}[✗] Active config not found at {CONFIG_PATH}.{COLOR_RESET}")
+        return 1
+
+    ptype = "Custom"
+    source = ""
+    if os.path.exists(SUB_URL_PATH):
+        try:
+            with open(SUB_URL_PATH, "r", encoding="utf-8") as f:
+                source = f.read().strip()
+            if source:
+                ptype = "subscription"
+        except Exception:
+            pass
+
+    ok = save_profile(name, CONFIG_PATH, ptype=ptype, source=source)
+    if ok:
+        set_current_profile_name(name)
+        print(f"{COLOR_GREEN}[✓] Current configuration saved as profile: {COLOR_BOLD}{name}{COLOR_RESET}")
+        return 0
+    return 1
+
+
+def cmd_profile_add(name, source, use=False):
+    if not name or not source:
+        print("Usage: pnode profile add <name> <url|vless|filepath>")
+        return 1
+
+    if not re.match(r'^[a-zA-Z0-9_\-]+$', name):
+        print(f"{COLOR_RED}[✗] Invalid profile name '{name}'. Use letters, numbers, hyphens, underscores.{COLOR_RESET}")
+        return 1
+
+    converter = get_converter_path()
+    if not converter:
+        print(f"{COLOR_RED}[✗] sub_converter.py not found on system.{COLOR_RESET}")
+        return 1
+
+    ensure_profiles_dir()
+    dest_json = os.path.join(PROFILES_DIR, f"{name}.json")
+
+    print(f"Adding profile '{name}' from source: {source} ...")
+    if source.startswith("http://") or source.startswith("https://"):
+        cmd = [sys.executable, converter, "--sub", source, "--output", dest_json]
+        ptype = "subscription"
+    elif source.startswith("vless://"):
+        cmd = [sys.executable, converter, "--vless", source, "--output", dest_json]
+        ptype = "vless"
+    elif os.path.exists(source):
+        cmd = [sys.executable, converter, "--file", source, "--output", dest_json]
+        ptype = "file"
+    else:
+        print(f"{COLOR_RED}[✗] Invalid source (must be a valid URL, vless:// URI, or local file path): {source}{COLOR_RESET}")
+        return 1
+
+    ret = subprocess.run(cmd)
+    if ret.returncode != 0:
+        print(f"{COLOR_RED}[✗] Failed to generate configuration for '{name}'.{COLOR_RESET}")
+        return 1
+
+    node_count, _, _ = inspect_config_file(dest_json)
+    meta = {
+        "name": name,
+        "type": ptype,
+        "source": source,
+        "node_count": node_count,
+        "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    try:
+        with open(os.path.join(PROFILES_DIR, f"{name}.meta.json"), "w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=2)
+    except Exception:
+        pass
+
+    print(f"{COLOR_GREEN}[✓] Profile '{COLOR_BOLD}{name}{COLOR_RESET}' successfully created ({node_count} nodes).")
+
+    if use:
+        return cmd_profile_use(name)
+    else:
+        print(f"To activate this profile, run: {COLOR_CYAN}pnode profile use {name}{COLOR_RESET}")
+        return 0
+
+
+def handle_profile_action(subaction, target, extra, force=False):
+    if not subaction or subaction in ("list", "ls"):
+        cmd_profile_list()
+        return 0
+    elif subaction in ("use", "switch", "select"):
+        return cmd_profile_use(target)
+    elif subaction in ("del", "rm", "delete", "remove"):
+        return cmd_profile_del(target, force=force)
+    elif subaction in ("save", "add-current"):
+        return cmd_profile_save(target)
+    elif subaction == "add":
+        return cmd_profile_add(target, extra)
+    else:
+        profiles = list_profiles()
+        prof = resolve_profile(subaction, profiles)
+        if prof and prof != "multiple":
+            return cmd_profile_use(prof["name"])
+        else:
+            print(f"Unknown profile action or name: '{subaction}'")
+            cmd_profile_list()
+            return 1
+
+
+def cmd_profile(args):
+    subaction = args.subaction
+    target = args.target
+    extra = args.extra
+    force = getattr(args, "force", False)
+    return handle_profile_action(subaction, target, extra, force=force)
+
+
+def cmd_config(args):
+    subaction = args.subaction
+    target = args.target
+    extra = args.extra
+    force = getattr(args, "force", False)
+
+    if subaction and os.path.exists(subaction):
+        config_file = subaction
+        profile_name = target or os.path.splitext(os.path.basename(config_file))[0]
+        converter = get_converter_path()
+        if not converter:
+            print(f"{COLOR_RED}[✗] sub_converter.py not found on system.{COLOR_RESET}")
+            return 1
+        print(f"Converting and applying config from: {config_file} ...")
+        cmd = [sys.executable, converter, "--file", config_file, "--output", CONFIG_PATH]
+        ret = subprocess.run(cmd)
+        if ret.returncode == 0:
+            if os.path.exists(SUB_URL_PATH):
+                os.remove(SUB_URL_PATH)
+            save_profile(profile_name, CONFIG_PATH, ptype="file", source=config_file)
+            set_current_profile_name(profile_name)
+            print(f"{COLOR_GREEN}[✓] Config applied and saved as profile '{profile_name}'. Restarting sing-box-client...{COLOR_RESET}")
+            subprocess.run(["systemctl", "restart", "sing-box-client"])
+            wait_for_api(5)
+            cmd_list(args)
+            return 0
+        else:
+            print(f"{COLOR_RED}[✗] Failed to apply config.{COLOR_RESET}")
+            return 1
+    else:
+        return handle_profile_action(subaction, target, extra, force=force)
+
+
+def cmd_update(args):
+    auto_init_current_profile_if_needed()
+    current_name = get_current_profile_name()
+    sub_url = ""
+
+    if current_name:
+        meta_path = os.path.join(PROFILES_DIR, f"{current_name}.meta.json")
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+                if meta.get("type") in ("subscription", "Subscription"):
+                    sub_url = meta.get("source", "")
+            except Exception:
+                pass
+
+    if not sub_url and os.path.exists(SUB_URL_PATH):
+        try:
+            with open(SUB_URL_PATH, "r", encoding="utf-8") as f:
+                sub_url = f.read().strip()
+        except Exception:
+            pass
+
+    if not sub_url:
+        print(f"{COLOR_YELLOW}[!] Current profile has no subscription URL. Update skipped.{COLOR_RESET}")
+        return 1
+
+    print(f"Updating subscription from: {sub_url} ...")
+    converter = get_converter_path()
+    if not converter:
+        print(f"{COLOR_RED}[✗] sub_converter.py not found on system.{COLOR_RESET}")
+        return 1
+
+    cmd = [sys.executable, converter, "--sub", sub_url, "--output", CONFIG_PATH]
+    ret = subprocess.run(cmd)
+    if ret.returncode == 0:
+        if current_name:
+            dest_json = os.path.join(PROFILES_DIR, f"{current_name}.json")
+            shutil.copy2(CONFIG_PATH, dest_json)
+            node_count, _, _ = inspect_config_file(dest_json)
+            meta = {
+                "name": current_name,
+                "type": "subscription",
+                "source": sub_url,
+                "node_count": node_count,
+                "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            try:
+                with open(os.path.join(PROFILES_DIR, f"{current_name}.meta.json"), "w", encoding="utf-8") as f:
+                    json.dump(meta, f, indent=2)
+            except Exception:
+                pass
+
+        print(f"{COLOR_GREEN}[✓] Subscription updated. Restarting sing-box-client...{COLOR_RESET}")
+        subprocess.run(["systemctl", "restart", "sing-box-client"])
+        wait_for_api(5)
+        cmd_list(args)
+    else:
+        print(f"{COLOR_RED}[✗] Failed to convert subscription.{COLOR_RESET}")
+        return 1
+
+
+def cmd_sub(args):
+    new_sub = args.url
+    profile_name = getattr(args, "name", None)
+    if not new_sub:
+        return cmd_update(args)
+
+    converter = get_converter_path()
+    if not converter:
+        print(f"{COLOR_RED}[✗] sub_converter.py not found on system.{COLOR_RESET}")
+        return 1
+
+    if profile_name:
+        return cmd_profile_add(profile_name, new_sub, use=True)
+
+    print(f"Fetching and configuring new subscription: {new_sub} ...")
+    cmd = [sys.executable, converter, "--sub", new_sub, "--output", CONFIG_PATH]
+    ret = subprocess.run(cmd)
+    if ret.returncode == 0:
+        with open(SUB_URL_PATH, "w", encoding="utf-8") as f:
+            f.write(new_sub.strip() + "\n")
+
+        current_name = get_current_profile_name() or "clash-sub"
+        save_profile(current_name, CONFIG_PATH, ptype="subscription", source=new_sub)
+        set_current_profile_name(current_name)
+
+        print(f"{COLOR_GREEN}[✓] Subscription configured and saved as profile '{current_name}'. Restarting sing-box-client...{COLOR_RESET}")
+        subprocess.run(["systemctl", "restart", "sing-box-client"])
+        wait_for_api(5)
+        cmd_list(args)
+    else:
+        print(f"{COLOR_RED}[✗] Failed to convert subscription.{COLOR_RESET}")
+        return 1
+
+
+def cmd_vless(args):
+    vless_uri = args.uri
+    profile_name = getattr(args, "name", None)
+    if not vless_uri:
+        if sys.stdin.isatty():
+            try:
+                vless_uri = input(f"{COLOR_BOLD}Enter vless:// link: {COLOR_RESET}").strip()
+            except (KeyboardInterrupt, EOFError):
+                print("\nCancelled.")
+                return 0
+        else:
+            print("Usage: proxy-node vless <vless://...> [profile_name]")
+            return 1
+
+    if not vless_uri.startswith("vless://"):
+        print(f"{COLOR_RED}[✗] Invalid VLESS URI (must start with 'vless://'){COLOR_RESET}")
+        return 1
+
+    if profile_name:
+        return cmd_profile_add(profile_name, vless_uri, use=True)
+
+    converter = get_converter_path()
+    if not converter:
+        print(f"{COLOR_RED}[✗] sub_converter.py not found on system.{COLOR_RESET}")
+        return 1
+
+    print("Configuring single VLESS node...")
+    cmd = [sys.executable, converter, "--vless", vless_uri, "--output", CONFIG_PATH]
+    ret = subprocess.run(cmd)
+    if ret.returncode == 0:
+        if os.path.exists(SUB_URL_PATH):
+            os.remove(SUB_URL_PATH)
+
+        parsed = urllib.parse.urlparse(vless_uri)
+        tag_name = urllib.parse.unquote(parsed.fragment) if parsed.fragment else "vless-node"
+        safe_name = re.sub(r'[^a-zA-Z0-9_\-]', '-', tag_name).strip('-') or "vless-node"
+
+        save_profile(safe_name, CONFIG_PATH, ptype="vless", source=vless_uri)
+        set_current_profile_name(safe_name)
+
+        print(f"{COLOR_GREEN}[✓] VLESS configured and saved as profile '{safe_name}'. Restarting sing-box-client...{COLOR_RESET}")
+        subprocess.run(["systemctl", "restart", "sing-box-client"])
+        wait_for_api(5)
+        cmd_list(args)
+        cmd_test(args)
+    else:
+        print(f"{COLOR_RED}[✗] Failed to configure VLESS.{COLOR_RESET}")
+        return 1
+
+
+def cmd_docker(args):
+    action = args.docker_action or "status"
+    docker_config_path = "/root/.docker/config.json"
+    user_docker_config = os.path.expanduser("~/.docker/config.json")
+    daemon_json_path = "/etc/docker/daemon.json"
+    docker_service_dir = "/etc/systemd/system/docker.service.d"
+    systemd_dropin = os.path.join(docker_service_dir, "sing-box-client.conf")
+    legacy_dropin = os.path.join(docker_service_dir, "http-proxy.conf")
+
+    if action == "status":
+        print(f"\n{COLOR_BOLD}{COLOR_CYAN}=== Docker Proxy Status ==={COLOR_RESET}")
+        has_client_proxy = False
+        for p in (docker_config_path, user_docker_config):
+            if os.path.exists(p):
+                try:
+                    with open(p, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    if "proxies" in data and "default" in data["proxies"]:
+                        has_client_proxy = True
+                        print(f"Container Mode:           {COLOR_GREEN}GLOBAL (All containers auto-proxied via {data['proxies']['default'].get('httpProxy')}){COLOR_RESET}")
+                        break
+                except Exception:
+                    pass
+        if not has_client_proxy:
+            print(f"Container Mode:           {COLOR_YELLOW}ON-DEMAND (Containers default to Direct connection){COLOR_RESET}")
+            print(f"  - On-Demand Command:    {COLOR_CYAN}dproxy run ...{COLOR_RESET}  (or --env-file /etc/sing-box-client/docker-proxy.env)")
+            print(f"  - Enable for ALL:       {COLOR_CYAN}pnode docker on{COLOR_RESET}")
+
+        has_boot_order = os.path.exists(systemd_dropin)
+        if has_boot_order:
+            print(f"Boot Auto-Start Order:    {COLOR_GREEN}ENABLED (docker.service starts After sing-box-client){COLOR_RESET}")
+        else:
+            print(f"Boot Auto-Start Order:    {COLOR_YELLOW}DISABLED{COLOR_RESET}")
+
+        has_daemon_proxy = False
+        if os.path.exists(daemon_json_path):
+            try:
+                with open(daemon_json_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if "proxies" in data:
+                    has_daemon_proxy = True
+            except Exception:
+                pass
+        if os.path.exists(systemd_dropin) or os.path.exists(legacy_dropin):
+            has_daemon_proxy = True
+        if has_daemon_proxy:
+            print(f"Docker Daemon Pull Proxy: {COLOR_GREEN}ENABLED (docker pull accelerated via 127.0.0.1:{PORT_HTTP}){COLOR_RESET}")
+        else:
+            print(f"Docker Daemon Pull Proxy: {COLOR_YELLOW}DISABLED{COLOR_RESET}")
+
+        print(f"\nCommands:")
+        print(f"  {COLOR_CYAN}pnode docker on{COLOR_RESET}       - Auto-route all containers through proxy")
+        print(f"  {COLOR_CYAN}pnode docker off{COLOR_RESET}      - Switch to On-Demand mode (containers direct)")
+        print(f"  {COLOR_CYAN}pnode docker status{COLOR_RESET}   - Show Docker proxy configuration")
+        print(f"  {COLOR_CYAN}pnode docker test{COLOR_RESET}     - Test Docker container connectivity\n")
+        return 0
+
+    elif action in ("on", "enable"):
+        print("Enabling automatic proxy for all Docker containers & boot auto-start...")
+        gw = "172.17.0.1"
+        try:
+            out = subprocess.check_output("ip -4 addr show docker0 | grep -oP '(?<=inet\\s)\\d+(\\.\\d+){3}' || true", shell=True).decode().strip()
+            if out:
+                gw = out.split()[0]
+        except Exception:
+            pass
+
+        proxy_url = f"http://{gw}:{PORT_HTTP}"
+        cfg_obj = {
+            "proxies": {
+                "default": {
+                    "httpProxy": proxy_url,
+                    "httpsProxy": proxy_url,
+                    "noProxy": "localhost,127.0.0.1,::1,172.16.0.0/12,192.168.0.0/16,10.0.0.0/8",
+                }
+            }
+        }
+        for p in (docker_config_path, user_docker_config):
+            try:
+                os.makedirs(os.path.dirname(p), exist_ok=True)
+                existing = {}
+                if os.path.exists(p):
+                    try:
+                        with open(p, "r", encoding="utf-8") as f:
+                            existing = json.load(f)
+                    except Exception:
+                        pass
+                existing["proxies"] = cfg_obj["proxies"]
+                with open(p, "w", encoding="utf-8") as f:
+                    json.dump(existing, f, indent=2)
+            except Exception as e:
+                print(f"Warning: could not write {p}: {e}")
+
+        # Systemd drop-in to ensure docker daemon uses proxy and starts After sing-box-client
+        try:
+            os.makedirs(docker_service_dir, exist_ok=True)
+            dropin_content = f"""[Unit]
+After=sing-box-client.service
+Wants=sing-box-client.service
+
+[Service]
+Environment="HTTP_PROXY=http://127.0.0.1:{PORT_HTTP}"
+Environment="HTTPS_PROXY=http://127.0.0.1:{PORT_HTTP}"
+Environment="NO_PROXY=localhost,127.0.0.1,::1,172.16.0.0/12,192.168.0.0/16,10.0.0.0/8"
+"""
+            with open(systemd_dropin, "w", encoding="utf-8") as f:
+                f.write(dropin_content)
+        except Exception as e:
+            print(f"Warning: could not write systemd dropin: {e}")
+
+        # Daemon proxy in daemon.json if present
+        if os.path.exists(daemon_json_path):
+            try:
+                with open(daemon_json_path, "r", encoding="utf-8") as f:
+                    d_cfg = json.load(f)
+                d_cfg.setdefault("proxies", {})
+                d_cfg["proxies"]["http-proxy"] = f"http://127.0.0.1:{PORT_HTTP}"
+                d_cfg["proxies"]["https-proxy"] = f"http://127.0.0.1:{PORT_HTTP}"
+                d_cfg["proxies"]["no-proxy"] = "localhost,127.0.0.1,::1,172.16.0.0/12,192.168.0.0/16,10.0.0.0/8"
+                with open(daemon_json_path, "w", encoding="utf-8") as f:
+                    json.dump(d_cfg, f, indent=2)
+            except Exception:
+                pass
+
+        # UFW rule
+        subprocess.run(f"ufw allow from 172.16.0.0/12 to any port {PORT_HTTP} proto tcp comment 'Docker bridge to sing-box client' >/dev/null 2>&1 || true", shell=True)
+
+        # Ensure services are enabled on boot
+        subprocess.run(["systemctl", "enable", "sing-box-client"], stderr=subprocess.DEVNULL)
+        subprocess.run(["systemctl", "enable", "docker"], stderr=subprocess.DEVNULL)
+
+        # Restart docker
+        print("Restarting Docker service...")
+        subprocess.run(["systemctl", "daemon-reload"])
+        subprocess.run(["systemctl", "restart", "docker"])
+        print(f"{COLOR_GREEN}[✓] Docker global proxy ENABLED (Auto-starts on boot!){COLOR_RESET}")
+        print(f"    - Containers:     All new containers will use {COLOR_BOLD}{proxy_url}{COLOR_RESET}")
+        print(f"    - Image Pulls:    docker pull will use {COLOR_BOLD}http://127.0.0.1:{PORT_HTTP}{COLOR_RESET}")
+        print(f"    - Boot Order:     docker.service will automatically wait for sing-box-client")
+        return 0
+
+    elif action in ("off", "disable"):
+        purge_all = getattr(args, "all", False)
+        print("Disabling Docker container automatic proxy (switching to On-Demand mode)...")
+        for p in (docker_config_path, user_docker_config):
+            if os.path.exists(p):
+                try:
+                    with open(p, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    if "proxies" in data:
+                        del data["proxies"]
+                    if data:
+                        with open(p, "w", encoding="utf-8") as f:
+                            json.dump(data, f, indent=2)
+                    else:
+                        os.remove(p)
+                except Exception:
+                    pass
+
+        if purge_all:
+            print("Purging Docker daemon pull proxy & systemd dropin...")
+            if os.path.exists(systemd_dropin):
+                try:
+                    os.remove(systemd_dropin)
+                except Exception:
+                    pass
+            if os.path.exists(legacy_dropin):
+                try:
+                    os.remove(legacy_dropin)
+                except Exception:
+                    pass
+            if os.path.exists(daemon_json_path):
+                try:
+                    with open(daemon_json_path, "r", encoding="utf-8") as f:
+                        d_cfg = json.load(f)
+                    if "proxies" in d_cfg:
+                        del d_cfg["proxies"]
+                    with open(daemon_json_path, "w", encoding="utf-8") as f:
+                        json.dump(d_cfg, f, indent=2)
+                except Exception:
+                    pass
+
+        print("Restarting Docker service...")
+        subprocess.run(["systemctl", "daemon-reload"])
+        subprocess.run(["systemctl", "restart", "docker"])
+        print(f"{COLOR_YELLOW}[!] Docker container auto-proxy DISABLED (On-Demand Mode Active).{COLOR_RESET}")
+        print(f"    - Containers:  Default to DIRECT connection (no proxy).")
+        print(f"    - On-Demand:   Run with {COLOR_CYAN}dproxy run ...{COLOR_RESET} to use proxy.")
+        if not purge_all:
+            print(f"    - Image Pulls: {COLOR_GREEN}docker pull remains accelerated{COLOR_RESET} via sing-box proxy.")
+            print(f"    - Boot Order:  {COLOR_GREEN}docker.service remains ordered after sing-box-client{COLOR_RESET}.")
+        return 0
+
+    elif action == "test":
+        print("Testing Docker container internet connection through proxy...")
+        try:
+            out = subprocess.check_output(
+                ["docker", "run", "--rm", "curlimages/curl:latest", "-s", "https://api.ipify.org"],
+                timeout=10,
+            ).decode().strip()
+            print(f"{COLOR_GREEN}[✓] Docker container test successful! Outbound IP: {out}{COLOR_RESET}")
+            return 0
+        except Exception as e:
+            print(f"{COLOR_RED}[✗] Docker container test failed: {e}{COLOR_RESET}")
+            return 1
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="sing-box client node and profile manager",
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
+    subparsers = parser.add_subparsers(dest="action")
+
+    # list
+    subparsers.add_parser("list", help="List all available nodes")
+    subparsers.add_parser("ls", help="Alias for list")
+
+    # switch
+    p_switch = subparsers.add_parser("switch", help="Switch proxy node by number or name")
+    p_switch.add_argument("node", nargs="?", default=None, help="Node number or name")
+
+    p_select = subparsers.add_parser("select", help="Alias for switch")
+    p_select.add_argument("node", nargs="?", default=None, help="Node number or name")
+
+    p_set = subparsers.add_parser("set", help="Alias for switch")
+    p_set.add_argument("node", nargs="?", default=None, help="Node number or name")
+
+    # current
+    subparsers.add_parser("current", help="Show currently active node name")
+
+    # test
+    subparsers.add_parser("test", help="Test connectivity and outbound IP")
+
+    # update
+    subparsers.add_parser("update", help="Update subscription and nodes from current profile")
+
+    # profile
+    p_prof = subparsers.add_parser("profile", help="Manage config profiles (list/use/del/save/add)")
+    p_prof.add_argument("subaction", nargs="?", default=None, help="Subcommand: list, use, del, save, add, or profile name/index")
+    p_prof.add_argument("target", nargs="?", default=None, help="Profile name or index to use/del/save")
+    p_prof.add_argument("extra", nargs="?", default=None, help="Source URL/URI/path for add")
+    p_prof.add_argument("-f", "--force", action="store_true", help="Force action without prompt")
+
+    # profiles alias
+    p_profs = subparsers.add_parser("profiles", help="Alias for 'profile list'")
+    p_profs.add_argument("subaction", nargs="?", default="list", help="Subcommand")
+    p_profs.add_argument("target", nargs="?", default=None, help="Target")
+    p_profs.add_argument("extra", nargs="?", default=None, help="Extra")
+    p_profs.add_argument("-f", "--force", action="store_true", help="Force action without prompt")
+
+    # config
+    p_cfg = subparsers.add_parser("config", help="Manage config profiles or apply config file")
+    p_cfg.add_argument("subaction", nargs="?", default=None, help="Subcommand (list/use/del/save/add), profile name, or config file path")
+    p_cfg.add_argument("target", nargs="?", default=None, help="Profile name or index")
+    p_cfg.add_argument("extra", nargs="?", default=None, help="Extra argument")
+    p_cfg.add_argument("-f", "--force", action="store_true", help="Force action without prompt")
+
+    # sub
+    p_sub = subparsers.add_parser("sub", help="Set new subscription URL or update current")
+    p_sub.add_argument("url", nargs="?", default=None, help="New subscription URL")
+    p_sub.add_argument("name", nargs="?", default=None, help="Optional profile name to save as")
+
+    # vless
+    p_vless = subparsers.add_parser("vless", help="Set a single VLESS URI")
+    p_vless.add_argument("uri", nargs="?", default=None, help="vless://... URI")
+    p_vless.add_argument("name", nargs="?", default=None, help="Optional profile name to save as")
+
+    # docker
+    p_docker = subparsers.add_parser("docker", help="Manage Docker container and daemon proxy (on/off/status/test)")
+    p_docker.add_argument("docker_action", nargs="?", choices=["enable", "disable", "on", "off", "status", "test"], default="status", help="Docker proxy action")
+    p_docker.add_argument("--all", action="store_true", help="When disabling, also remove daemon pull proxy and dropin")
+
+    # Allow direct: `proxy-node 2` -> switches to node 2
+    if len(sys.argv) == 2 and (sys.argv[1].isdigit() or not sys.argv[1].startswith("-")):
+        if sys.argv[1] not in (
+            "list", "ls", "switch", "select", "set", "current", "test", "update",
+            "profile", "profiles", "config", "sub", "vless", "docker", "help", "-h", "--help"
+        ):
+            sys.argv.insert(1, "switch")
+
+    args = parser.parse_args()
+
+    action = args.action
+    if not action or action in ("list", "ls"):
+        cmd_list(args)
+    elif action in ("switch", "select", "set"):
+        sys.exit(cmd_switch(args) or 0)
+    elif action == "current":
+        cmd_current(args)
+    elif action == "test":
+        sys.exit(cmd_test(args) or 0)
+    elif action == "update":
+        sys.exit(cmd_update(args) or 0)
+    elif action in ("profile", "profiles"):
+        sys.exit(cmd_profile(args) or 0)
+    elif action == "config":
+        sys.exit(cmd_config(args) or 0)
+    elif action == "sub":
+        sys.exit(cmd_sub(args) or 0)
+    elif action == "vless":
+        sys.exit(cmd_vless(args) or 0)
+    elif action == "docker":
+        sys.exit(cmd_docker(args) or 0)
+
+
+if __name__ == "__main__":
+    main()

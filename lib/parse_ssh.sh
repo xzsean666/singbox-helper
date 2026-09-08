@@ -73,6 +73,10 @@ parse_ssh_command() {
         return 1
     fi
 
+    if [[ -n "$SSH_IDENTITY" && "$SSH_IDENTITY" == ~* ]]; then
+        SSH_IDENTITY="${SSH_IDENTITY/#\~/$HOME}"
+    fi
+
     return 0
 }
 

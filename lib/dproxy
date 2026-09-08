@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Runs a Docker container with sing-box client proxy environment.
+# Supports both `dproxy run --rm ...` and `dproxy --rm ...`.
+if [[ "${1:-}" == "run" ]]; then
+    shift
+fi
+exec docker run --env-file /etc/sing-box-client/docker-proxy.env "$@"

@@ -1,2 +1,5 @@
 servers/*/
 !servers/.gitkeep
+.env
+__pycache__/
+*.pyc

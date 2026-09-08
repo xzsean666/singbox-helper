@@ -113,3 +113,146 @@ extra docker networking. `setup-server.sh` automatically drops the
 most-recently-set-up server's client config into that example so it works
 out of the box; see that directory's README for how to point it at a
 different server if you've set up several.
+
+## Client Installation (`setup-client.sh`)
+
+Installs a persistent, auto-starting `sing-box-client` systemd service on any Linux machine via SSH.
+
+It supports:
+- **Clash subscription URLs** (`--sub`): fetches and converts all nodes (VLESS, VMess, Trojan, Shadowsocks, Hysteria2), creating a selector group with hot node switching.
+- **Single VLESS links** (`--vless`): converts a standard `vless://...` URI into a sing-box client config.
+- **Custom configs** (`--config`): sing-box JSON or Clash YAML files.
+- **Existing server aliases** (`--server`): seamlessly uses a server set up via `setup-server.sh`.
+
+```bash
+# 1. From a Clash subscription link:
+./setup-client.sh "ssh root@client.ip" --sub "https://example.com/api/v1/client/subscribe?token=xxx"
+
+# 2. From a single vless link:
+./setup-client.sh "ssh root@client.ip" --vless "vless://uuid@host:443?security=reality&...#MyNode"
+
+# 3. From a previously configured server alias:
+./setup-client.sh "ssh root@client.ip" --server tokyo
+
+# 4. From a local config file:
+./setup-client.sh "ssh root@client.ip" --config my-config.json
+```
+
+### Managing & Switching Nodes on Remote Server (`pnode` / `proxy-node`)
+
+The client includes a command-line tool (`proxy-node`, aliased to `pnode`) on the remote server:
+
+```bash
+# 1. List all available nodes and show currently active node:
+pnode
+
+# 2. Switch to a node by number or name (hot switch, no restart needed):
+pnode 2
+pnode switch "Hong Kong 01"
+
+# 3. Interactive prompt to choose a node:
+pnode switch
+
+# 4. Switch to a new Clash subscription URL directly on the server:
+pnode sub "https://example.com/api/v1/client/subscribe?token=yyy" [profile_name]
+
+# 5. Switch to a single VLESS link directly on the server:
+pnode vless "vless://uuid@host:443?security=reality&...#MyNode" [profile_name]
+
+# 6. Update current subscription nodes (re-fetch from saved URL):
+pnode update
+
+# 7. Docker container & daemon proxy management:
+pnode docker status   # Check Docker proxy status (container mode, daemon pull, boot order)
+pnode docker on       # Enable global proxy for ALL Docker containers
+pnode docker off      # Switch to On-Demand mode (containers default to direct)
+pnode docker test     # Test Docker container connectivity through proxy
+
+# 8. Test connection and show outbound IP:
+pnode test
+```
+
+### Docker Acceleration & Container Proxy Modes
+
+The client setup automatically configures Docker integration:
+
+1. **Docker Daemon Acceleration (`docker pull`)**:
+   Always enabled by default via `/etc/systemd/system/docker.service.d/sing-box-client.conf`. Image pulls from Docker Hub / GHCR are accelerated, and Docker automatically starts after `sing-box-client`.
+
+2. **Containers On-Demand Mode (Default)**:
+   By default, containers connect directly to the internet (domestic speed, internal networks unaffected). When a specific container needs proxy:
+   ```bash
+   # CLI shortcut:
+   dproxy run --rm curlimages/curl:latest -s https://api.ipify.org
+   dproxy --rm -it alpine
+
+   # Or standard docker run with env-file:
+   docker run --rm --env-file /etc/sing-box-client/docker-proxy.env alpine
+
+   # In docker-compose.yml:
+   services:
+     myservice:
+       image: myimage
+       env_file:
+         - /etc/sing-box-client/docker-proxy.env
+   ```
+
+3. **Global Container Proxy Mode (Optional)**:
+   ```bash
+   pnode docker on    # All new containers automatically route through proxy
+   pnode docker off   # Return to on-demand mode (containers default to direct)
+   pnode docker status # View current Docker proxy status
+   pnode docker test   # Run a test container through the proxy
+   ```
+
+### Config Profile Management (`pnode profile` / `pnode config`)
+
+You can store multiple independent configurations (different subscriptions, standalone VLESS links, custom configs), switch between them, and delete old ones:
+
+```bash
+# List all configured profiles (shows active profile, node counts, type, source):
+pnode profile        # or: pnode profiles / pnode config list
+
+# Switch to a configured profile by name or number:
+pnode profile use hk-vless
+pnode profile use 1              # or: pnode config use 1
+
+# Delete a configured profile by name or number:
+pnode profile del old-sub
+pnode profile del 3              # or: pnode config del 3
+
+# Save current running configuration as a new named profile:
+pnode profile save my-backup
+
+# Add a new profile from subscription URL, VLESS link, or local file:
+pnode profile add provider2 "https://example.com/sub/..."
+pnode profile add backup-vless "vless://..."
+pnode profile add custom /path/to/custom.json
+```
+
+### Shell Environment Proxy in `~/.bashrc` (Default: OFF)
+
+`setup-client.sh` injects proxy helper functions into `~/.bashrc`. **The proxy is disabled by default** upon logging in.
+
+```bash
+# Enable proxy environment for current shell (127.0.0.1:1080):
+proxy on
+
+# Disable proxy environment:
+proxy off
+
+# View proxy environment, client service status, and active node:
+proxy status
+
+# Test outbound IP through the proxy:
+proxy test
+```
+
+### Uninstalling Client
+
+```bash
+./uninstall-client.sh "ssh root@client.ip"
+./uninstall-client.sh "ssh root@client.ip" --yes
+./uninstall-client.sh "ssh root@client.ip" --purge-binary
+```
+
