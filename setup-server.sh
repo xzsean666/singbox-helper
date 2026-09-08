@@ -183,9 +183,6 @@ render_client_config() {
 }
 render_client_config "${SCRIPT_DIR}/templates/client-config.json.tpl" "${SERVER_DIR}/client-config.json"
 
-mkdir -p "${SCRIPT_DIR}/examples/docker-client/config"
-cp "${SERVER_DIR}/client-config.json" "${SCRIPT_DIR}/examples/docker-client/config/sing-box-client.json"
-
 VLESS_URI="vless://${UUID}@${SSH_HOST}:${PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp#${ALIAS}"
 echo "${VLESS_URI}" > "${SERVER_DIR}/vless.txt"
 HTTP_PROXY_URI="http://${HTTP_USERNAME}:${HTTP_PASSWORD}@${SSH_HOST}:${HTTP_PORT}"
@@ -220,7 +217,3 @@ if command -v qrencode >/dev/null 2>&1; then
 else
     echo "    (qrencode not installed - skipping QR code generation. Install it to get a scannable QR code.)"
 fi
-
-echo ""
-echo "    Docker client example is ready at: examples/docker-client/"
-echo "    Run: cd examples/docker-client && docker compose up -d"

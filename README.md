@@ -2,9 +2,7 @@
 
 Give it an ssh login command for a server, and it installs and configures a
 [sing-box](https://sing-box.sagernet.org) **VLESS + Reality** proxy server
-there, plus a password-authenticated HTTP proxy on a separate port. Includes a
-ready-to-run docker-compose example showing how a container
-on a *different* server can use that proxy to reach the internet.
+there, plus a password-authenticated HTTP proxy on a separate port.
 
 VLESS + Reality was chosen over plain Shadowsocks for its resistance to active
 probing and DPI: the server performs a real TLS handshake using the
@@ -43,7 +41,7 @@ This will:
    run it as a `sing-box` systemd service.
 4. Open the chosen port in `ufw` if it's active; otherwise it'll tell you to
    open it yourself (e.g. a cloud provider's security group / firewalld).
-5. Save the connection details locally and generate a docker-client config.
+5. Save the connection details and client config locally.
 
 The `--sni` domain must be a real, internet-reachable site that serves TLS
 1.3 on port 443 - the server "pretends" to be that site to anyone who
@@ -103,16 +101,6 @@ remote host, closes the VLESS and HTTP proxy ports in `ufw` if they were opened
 there, and deletes the local `servers/myserver/` directory. Prompts for
 confirmation unless `--yes` is passed. The `sing-box` binary itself is left on the remote host
 (harmless, and shared across reinstalls) unless `--purge-binary` is given.
-
-## Using the proxy from docker (on any other server)
-
-See [`examples/docker-client/`](examples/docker-client/) - a docker-compose
-setup where a business container shares the sing-box client container's
-network namespace, so it can reach the proxy at `127.0.0.1:1080` with no
-extra docker networking. `setup-server.sh` automatically drops the
-most-recently-set-up server's client config into that example so it works
-out of the box; see that directory's README for how to point it at a
-different server if you've set up several.
 
 ## Client Installation (`setup-client.sh`)
 
