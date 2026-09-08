@@ -207,6 +207,13 @@ if [[ -n "$SUDO" && -f /root/.bashrc ]] && ! $SUDO grep -q "singbox-proxy.sh" /r
 EOF'
 fi
 
+# Stop and disable any conflicting generic sing-box service if running
+if $SUDO systemctl is-active --quiet sing-box 2>/dev/null; then
+    echo "Stopping conflicting sing-box service..."
+    $SUDO systemctl stop sing-box 2>/dev/null || true
+    $SUDO systemctl disable sing-box 2>/dev/null || true
+fi
+
 # Install systemd service
 sed -i "s|{{INSTALL_BIN}}|${INSTALL_BIN}|g" "${SETUP_DIR}/sing-box-client.service"
 $SUDO cp "${SETUP_DIR}/sing-box-client.service" "$SERVICE_FILE"

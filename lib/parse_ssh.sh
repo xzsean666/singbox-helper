@@ -74,7 +74,15 @@ parse_ssh_command() {
     fi
 
     if [[ -n "$SSH_IDENTITY" && "$SSH_IDENTITY" == ~* ]]; then
-        SSH_IDENTITY="${SSH_IDENTITY/#\~/$HOME}"
+        local expanded="${SSH_IDENTITY/#\~/$HOME}"
+        if [[ ! -f "$expanded" ]]; then
+            local real_home
+            real_home=$(getent passwd "$(id -un)" 2>/dev/null | cut -d: -f6)
+            if [[ -n "$real_home" && -f "${SSH_IDENTITY/#\~/$real_home}" ]]; then
+                expanded="${SSH_IDENTITY/#\~/$real_home}"
+            fi
+        fi
+        SSH_IDENTITY="$expanded"
     fi
 
     return 0

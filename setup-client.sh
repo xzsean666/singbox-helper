@@ -100,6 +100,27 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Load .env if present
+ENV_FILE=""
+if [[ -f "${SCRIPT_DIR}/.env" ]]; then
+    ENV_FILE="${SCRIPT_DIR}/.env"
+elif [[ -f ".env" ]]; then
+    ENV_FILE=".env"
+fi
+
+if [[ -n "$ENV_FILE" && -z "$SUB_URL" && -z "$VLESS_URI" && -z "$CONFIG_PATH" && -z "$SERVER_ALIAS" ]]; then
+    ENV_SUB=$(grep -E '^[[:space:]]*CLASH_SUBSCRIPTION_URL=' "$ENV_FILE" | head -n1 | cut -d= -f2- | tr -d '\r\n' | sed -e 's/^[[:space:]]*["'\'']//' -e 's/["'\''][[:space:]]*$//' || true)
+    ENV_VLESS=$(grep -E '^[[:space:]]*VLESS_URI=' "$ENV_FILE" | head -n1 | cut -d= -f2- | tr -d '\r\n' | sed -e 's/^[[:space:]]*["'\'']//' -e 's/["'\''][[:space:]]*$//' || true)
+
+    if [[ -n "$ENV_SUB" ]]; then
+        echo "==> Using CLASH_SUBSCRIPTION_URL from .env"
+        SUB_URL="$ENV_SUB"
+    elif [[ -n "$ENV_VLESS" ]]; then
+        echo "==> Using VLESS_URI from .env"
+        VLESS_URI="$ENV_VLESS"
+    fi
+fi
+
 # Ensure exactly one config source is given
 SOURCE_COUNT=0
 [[ -n "$SUB_URL" ]] && SOURCE_COUNT=$((SOURCE_COUNT + 1))
