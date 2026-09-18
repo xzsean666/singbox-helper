@@ -18,16 +18,27 @@ else
     SUDO="sudo"
 fi
 
-echo "Stopping and disabling sing-box-client service..."
+echo "Stopping and disabling sing-box-client service and any port instances..."
 $SUDO systemctl stop sing-box-client 2>/dev/null || true
 $SUDO systemctl disable sing-box-client 2>/dev/null || true
+
+for svc in $(systemctl list-units --type=service 'sing-box-port@*' --no-legend 2>/dev/null | awk '{print $1}'); do
+    [[ -n "$svc" ]] || continue
+    echo "Stopping $svc..."
+    $SUDO systemctl stop "$svc" 2>/dev/null || true
+    $SUDO systemctl disable "$svc" 2>/dev/null || true
+done
 
 SERVICE_FILE="/etc/systemd/system/sing-box-client.service"
 if [[ -e "$SERVICE_FILE" ]]; then
     $SUDO rm -f "$SERVICE_FILE"
-    $SUDO systemctl daemon-reload
-    $SUDO systemctl reset-failed 2>/dev/null || true
 fi
+PORT_SERVICE_FILE="/etc/systemd/system/sing-box-port@.service"
+if [[ -e "$PORT_SERVICE_FILE" ]]; then
+    $SUDO rm -f "$PORT_SERVICE_FILE"
+fi
+$SUDO systemctl daemon-reload
+$SUDO systemctl reset-failed 2>/dev/null || true
 
 echo "Removing sing-box-client configuration and data..."
 $SUDO rm -rf /etc/sing-box-client /var/lib/sing-box-client

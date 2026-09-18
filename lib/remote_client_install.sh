@@ -105,6 +105,7 @@ fi
 # Prepare directories
 $SUDO mkdir -p "$CONFIG_DIR"
 $SUDO mkdir -p "${CONFIG_DIR}/profiles"
+$SUDO mkdir -p "${CONFIG_DIR}/ports"
 $SUDO mkdir -p "$STATE_DIR"
 
 # Copy configuration and subscription
@@ -218,6 +219,13 @@ fi
 sed -i "s|{{INSTALL_BIN}}|${INSTALL_BIN}|g" "${SETUP_DIR}/sing-box-client.service"
 $SUDO cp "${SETUP_DIR}/sing-box-client.service" "$SERVICE_FILE"
 $SUDO chmod 0644 "$SERVICE_FILE"
+
+PORT_SERVICE_FILE="/etc/systemd/system/sing-box-port@.service"
+if [[ -f "${SETUP_DIR}/sing-box-port@.service" ]]; then
+    sed -i "s|{{INSTALL_BIN}}|${INSTALL_BIN}|g" "${SETUP_DIR}/sing-box-port@.service"
+    $SUDO cp "${SETUP_DIR}/sing-box-port@.service" "$PORT_SERVICE_FILE"
+    $SUDO chmod 0644 "$PORT_SERVICE_FILE"
+fi
 
 $SUDO systemctl daemon-reload
 $SUDO systemctl enable sing-box-client >/dev/null

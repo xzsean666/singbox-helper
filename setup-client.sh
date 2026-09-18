@@ -248,6 +248,7 @@ echo "${PROFILE_NAME}" > "${TMP_WORK}/current_profile.txt"
 # Prepare service and profile templates
 sed "s|{{PORT}}|${PORT}|g" "${SCRIPT_DIR}/templates/profile-proxy.sh.tpl" > "${TMP_WORK}/profile-proxy.sh"
 cp "${SCRIPT_DIR}/templates/sing-box-client.service.tpl" "${TMP_WORK}/sing-box-client.service"
+cp "${SCRIPT_DIR}/templates/sing-box-port@.service.tpl" "${TMP_WORK}/sing-box-port@.service"
 cp "${SCRIPT_DIR}/lib/proxy-node" "${TMP_WORK}/proxy-node"
 chmod +x "${TMP_WORK}/proxy-node"
 
@@ -257,6 +258,7 @@ ssh "${SSH_ARGS[@]}" "mkdir -p /tmp/singbox-client-setup"
 FILES_TO_UPLOAD=(
     "${CLIENT_CONFIG}"
     "${TMP_WORK}/sing-box-client.service"
+    "${TMP_WORK}/sing-box-port@.service"
     "${TMP_WORK}/proxy-node"
     "${TMP_WORK}/profile-proxy.sh"
     "${TMP_WORK}/profile_info.json"

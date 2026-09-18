@@ -22,6 +22,8 @@ CONFIG_PATH = "/etc/sing-box-client/config.json"
 SUB_URL_PATH = "/etc/sing-box-client/sub_url.txt"
 PROFILES_DIR = "/etc/sing-box-client/profiles"
 CURRENT_PROFILE_PATH = "/etc/sing-box-client/current_profile.txt"
+PORTS_DIR = "/etc/sing-box-client/ports"
+PORT_SERVICE_TEMPLATE = "/etc/systemd/system/sing-box-port@.service"
 PORT_HTTP = 1080
 
 COLOR_GREEN = "\033[32m"
@@ -56,6 +58,13 @@ def get_converter_path():
 def ensure_profiles_dir():
     try:
         os.makedirs(PROFILES_DIR, exist_ok=True)
+    except Exception:
+        pass
+
+
+def ensure_ports_dir():
+    try:
+        os.makedirs(PORTS_DIR, exist_ok=True)
     except Exception:
         pass
 
@@ -291,13 +300,22 @@ def set_proxy(node_name):
         return resp.status in (200, 204)
 
 
-def cmd_list(args):
+def cmd_list(port=PORT_HTTP):
+    if not port:
+        port = PORT_HTTP
+    try:
+        port = int(port)
+    except Exception:
+        port = PORT_HTTP
+
+    if port != PORT_HTTP:
+        return cmd_port_nodes(port)
+
     try:
         data = get_proxies()
         proxies_map = data.get("proxies", {})
         selector = proxies_map.get(PROXY_TAG, {})
         if not selector:
-            # Maybe selector has a different tag
             for k, v in proxies_map.items():
                 if v.get("type") == "Selector":
                     selector = v
@@ -307,11 +325,11 @@ def cmd_list(args):
 
         if not all_nodes:
             print(f"{COLOR_YELLOW}[!] No outbounds found in selector '{PROXY_TAG}'.{COLOR_RESET}")
-            return
+            return 0
 
         active_prof = get_current_profile_name()
         prof_header = f" (Profile: {active_prof})" if active_prof else ""
-        print(f"\n{COLOR_BOLD}{COLOR_CYAN}=== Available Proxy Nodes ({len(all_nodes)} total){prof_header} ==={COLOR_RESET}")
+        print(f"\n{COLOR_BOLD}{COLOR_CYAN}=== Available Proxy Nodes (Port {port}){prof_header} ({len(all_nodes)} total) ==={COLOR_RESET}")
         print("-" * 68)
         print(f" {'#':<4} {'Type':<12} {'Status':<12} {'Node Name'}")
         print("-" * 68)
@@ -322,12 +340,13 @@ def cmd_list(args):
                 status = "[*] Active"
                 print(f" {COLOR_GREEN}{idx:<4} {ntype:<12} {status:<12} {name}{COLOR_RESET}")
             else:
-                status = ""
-                print(f" {idx:<4} {ntype:<12} {status:<12} {name}")
+                print(f" {idx:<4} {ntype:<12} {'':<12} {name}")
         print("-" * 68)
         print(f"Current active node: {COLOR_GREEN}{COLOR_BOLD}{now_node}{COLOR_RESET}")
-        print(f"Switch node:    {COLOR_CYAN}pnode switch <number|name>{COLOR_RESET}  (or: {COLOR_CYAN}pnode <number>{COLOR_RESET})")
-        print(f"Switch profile: {COLOR_CYAN}pnode profile use <name|#>{COLOR_RESET}  (or: {COLOR_CYAN}pnode profiles{COLOR_RESET})\n")
+        print(f"Switch node:    {COLOR_CYAN}pnode <#|name>{COLOR_RESET}        (e.g. 'pnode 2', 'pnode 日本')")
+        print(f"Switch profile: {COLOR_CYAN}pnode use <#|name>{COLOR_RESET}     (e.g. 'pnode use 1')")
+        print(f"Multi-port:     {COLOR_CYAN}pnode 1081 use <#|name>{COLOR_RESET} (or: 'pnode add <profile>')\n")
+        return 0
     except Exception as e:
         print(f"{COLOR_YELLOW}[!] Cannot connect to sing-box Clash API (127.0.0.1:9090): {e}{COLOR_RESET}")
         if os.path.exists(CONFIG_PATH):
@@ -344,97 +363,6 @@ def cmd_list(args):
             except Exception:
                 pass
         print("Please check if sing-box-client is running: systemctl status sing-box-client")
-
-
-def cmd_switch(args):
-    target = args.node
-    try:
-        selector = get_current_selector()
-        all_nodes = selector.get("all", [])
-        if not all_nodes:
-            print(f"{COLOR_RED}[✗] No nodes available to select.{COLOR_RESET}")
-            return 1
-
-        if not target:
-            # Interactive selection if stdin is tty
-            if sys.stdin.isatty():
-                cmd_list(args)
-                try:
-                    choice = input(f"{COLOR_BOLD}Enter node number to switch [1-{len(all_nodes)}]: {COLOR_RESET}").strip()
-                    if not choice:
-                        print("Cancelled.")
-                        return 0
-                    target = choice
-                except (KeyboardInterrupt, EOFError):
-                    print("\nCancelled.")
-                    return 0
-            else:
-                print("Usage: proxy-node switch <number|name>")
-                return 1
-
-        target_node = None
-        if target.isdigit():
-            idx = int(target) - 1
-            if 0 <= idx < len(all_nodes):
-                target_node = all_nodes[idx]
-            else:
-                print(f"{COLOR_RED}[✗] Index out of range. Please enter 1 to {len(all_nodes)}.{COLOR_RESET}")
-                return 1
-        else:
-            # Match by exact name or case-insensitive prefix
-            for name in all_nodes:
-                if name.lower() == target.lower():
-                    target_node = name
-                    break
-            if not target_node:
-                # Partial match
-                matches = [name for name in all_nodes if target.lower() in name.lower()]
-                if len(matches) == 1:
-                    target_node = matches[0]
-                elif len(matches) > 1:
-                    print(f"{COLOR_YELLOW}[!] Multiple nodes match '{target}':{COLOR_RESET}")
-                    for m in matches:
-                        print(f"  - {m}")
-                    return 1
-                else:
-                    print(f"{COLOR_RED}[✗] Node '{target}' not found.{COLOR_RESET}")
-                    return 1
-
-        set_proxy(target_node)
-        print(f"{COLOR_GREEN}[✓] Successfully switched to node: {COLOR_BOLD}{target_node}{COLOR_RESET}")
-        return 0
-    except Exception as e:
-        print(f"{COLOR_RED}[✗] Failed to switch node: {e}{COLOR_RESET}")
-        return 1
-
-
-def cmd_current(args):
-    try:
-        selector = get_current_selector()
-        print(selector.get("now", "unknown"))
-    except Exception as e:
-        print(f"unknown ({e})")
-
-
-def cmd_test(args):
-    print("Testing connection through 127.0.0.1:1080 ...")
-    start = time.time()
-    try:
-        proxy_handler = urllib.request.ProxyHandler({
-            "http": f"http://127.0.0.1:{PORT_HTTP}",
-            "https": f"http://127.0.0.1:{PORT_HTTP}",
-        })
-        opener = urllib.request.build_opener(proxy_handler)
-        req = urllib.request.Request("https://api.ipify.org?format=json", headers={"User-Agent": "curl/7.81.0"})
-        with opener.open(req, timeout=6) as resp:
-            elapsed = int((time.time() - start) * 1000)
-            res = json.loads(resp.read().decode())
-            ip = res.get("ip", "")
-            print(f"{COLOR_GREEN}[✓] Connection successful!{COLOR_RESET}")
-            print(f"    Outbound IP: {COLOR_BOLD}{ip}{COLOR_RESET}")
-            print(f"    Latency:     {elapsed} ms")
-    except Exception as e:
-        print(f"{COLOR_RED}[✗] Proxy test failed: {e}{COLOR_RESET}")
         return 1
 
 
@@ -452,8 +380,20 @@ def cmd_profile_list(args=None):
     print("-" * 84)
     print(f" {'#':<4} {'Status':<12} {'Profile Name':<18} {'Nodes':<8} {'Type':<14} {'Source / Date'}")
     print("-" * 84)
+    bound_ports = get_bound_ports()
     for idx, p in enumerate(profiles, 1):
-        status_str = f"{COLOR_GREEN}[*] Active{COLOR_RESET}" if p["name"] == current_name else ""
+        p_name = p["name"]
+        assigned_ports = [str(pt) for pt, info in bound_ports.items() if info.get("profile") == p_name]
+        if p_name == current_name:
+            if assigned_ports:
+                status_str = f"{COLOR_GREEN}1080,{','.join(assigned_ports)}{COLOR_RESET}"
+            else:
+                status_str = f"{COLOR_GREEN}[*] Active{COLOR_RESET}"
+        elif assigned_ports:
+            status_str = f"{COLOR_CYAN}Port {','.join(assigned_ports)}{COLOR_RESET}"
+        else:
+            status_str = ""
+
         source_display = p["source"]
         if source_display:
             if len(source_display) > 28:
@@ -462,22 +402,23 @@ def cmd_profile_list(args=None):
         else:
             info_str = p["mtime_str"]
 
-        p_name = p["name"]
         ptype_display = p["type"].capitalize()
         if p["name"] == current_name:
             print(f" {COLOR_GREEN}{idx:<4} {status_str:<21} {COLOR_BOLD}{p_name:<18}{COLOR_RESET} {p['node_count']:<8} {ptype_display:<14} {info_str}")
         else:
-            print(f" {idx:<4} {'':<12} {p_name:<18} {p['node_count']:<8} {ptype_display:<14} {info_str}")
+            print(f" {idx:<4} {status_str:<21} {p_name:<18} {p['node_count']:<8} {ptype_display:<14} {info_str}")
     print("-" * 84)
     if current_name:
-        print(f"Current active profile: {COLOR_GREEN}{COLOR_BOLD}{current_name}{COLOR_RESET}")
+        print(f"Current active profile (Port 1080): {COLOR_GREEN}{COLOR_BOLD}{current_name}{COLOR_RESET}")
     else:
-        print(f"Current active profile: {COLOR_YELLOW}custom / unnamed{COLOR_RESET}")
+        print(f"Current active profile (Port 1080): {COLOR_YELLOW}custom / unnamed{COLOR_RESET}")
     print(f"\nProfile Commands:")
-    print(f"  Switch:   {COLOR_CYAN}pnode profile use <name|#>{COLOR_RESET}  (alias: {COLOR_CYAN}pnode config use <name|#>{COLOR_RESET})")
-    print(f"  Delete:   {COLOR_CYAN}pnode profile del <name|#>{COLOR_RESET}  (alias: {COLOR_CYAN}pnode config del <name|#>{COLOR_RESET})")
-    print(f"  Save:     {COLOR_CYAN}pnode profile save <name>{COLOR_RESET}")
-    print(f"  Add:      {COLOR_CYAN}pnode profile add <name> <url|vless|file>{COLOR_RESET}\n")
+    print(f"  Switch (Port 1080): {COLOR_CYAN}pnode use <#|name>{COLOR_RESET}        (e.g. 'pnode use 1', 'pnode use jp')")
+    print(f"  Auto Add Port:      {COLOR_CYAN}pnode add <#|name>{COLOR_RESET}        (e.g. 'pnode add 2' -> auto starts on 1081)")
+    print(f"  Host on Port:       {COLOR_CYAN}pnode [port] use <#|name>{COLOR_RESET} (e.g. 'pnode 1081 use 2')")
+    print(f"  Delete Profile:     {COLOR_CYAN}pnode profile del <#|name>{COLOR_RESET}")
+    print(f"  Save Current:       {COLOR_CYAN}pnode profile save <name>{COLOR_RESET}")
+    print(f"  Add Profile:        {COLOR_CYAN}pnode profile add <name> <url|vless|file>{COLOR_RESET}\n")
 
 
 def cmd_profile_use(target):
@@ -565,7 +506,7 @@ def cmd_profile_use(target):
         return 1
 
     print(f"{COLOR_GREEN}[✓] Successfully switched to profile: {COLOR_BOLD}{target_name}{COLOR_RESET}")
-    cmd_list(None)
+    cmd_list(PORT_HTTP)
     return 0
 
 
@@ -602,8 +543,13 @@ def cmd_profile_del(target, force=False):
     is_active = prof["is_active"]
 
     if is_active:
-        print(f"{COLOR_YELLOW}[!] Note: Profile '{target_name}' is currently ACTIVE.{COLOR_RESET}")
+        print(f"{COLOR_YELLOW}[!] Note: Profile '{target_name}' is currently ACTIVE on Port 1080.{COLOR_RESET}")
         print(f"    Deleting it removes the saved profile record. sing-box-client continues running the current config until you switch profiles.")
+
+    bound_ports = [str(pt) for pt, p_info in get_bound_ports().items() if p_info.get("profile") == target_name]
+    if bound_ports:
+        print(f"{COLOR_YELLOW}[!] Warning: Profile '{target_name}' is currently bound to port(s): {', '.join(bound_ports)}.{COLOR_RESET}")
+        print(f"    To unbind first, run: {COLOR_CYAN}pnode port unbind <port>{COLOR_RESET}")
 
     if not force and sys.stdin.isatty():
         try:
@@ -779,7 +725,7 @@ def cmd_config(args):
             print(f"{COLOR_GREEN}[✓] Config applied and saved as profile '{profile_name}'. Restarting sing-box-client...{COLOR_RESET}")
             subprocess.run(["systemctl", "restart", "sing-box-client"])
             wait_for_api(5)
-            cmd_list(args)
+            cmd_list(PORT_HTTP)
             return 0
         else:
             print(f"{COLOR_RED}[✗] Failed to apply config.{COLOR_RESET}")
@@ -788,14 +734,42 @@ def cmd_config(args):
         return handle_profile_action(subaction, target, extra, force=force)
 
 
-def cmd_update(args):
+def cmd_update(args=None):
     auto_init_current_profile_if_needed()
-    current_name = get_current_profile_name()
-    sub_url = ""
+    target_prof_name = None
+    if isinstance(args, list):
+        target_prof_name = args[0] if args else None
+    elif isinstance(args, str):
+        target_prof_name = args
+    elif hasattr(args, "profile"):
+        target_prof_name = getattr(args, "profile", None)
 
-    if current_name:
-        meta_path = os.path.join(PROFILES_DIR, f"{current_name}.meta.json")
-        if os.path.exists(meta_path):
+    profiles = list_profiles()
+    current_name = get_current_profile_name()
+    prof_to_update = None
+
+    if target_prof_name:
+        prof = resolve_profile(target_prof_name, profiles)
+        if prof == "multiple":
+            return 1
+        if not prof:
+            print(f"{COLOR_RED}[✗] Profile '{target_prof_name}' not found.{COLOR_RESET}")
+            return 1
+        prof_to_update = prof
+        target_name = prof["name"]
+    elif current_name:
+        for p in profiles:
+            if p["name"] == current_name:
+                prof_to_update = p
+                break
+        target_name = current_name
+    else:
+        target_name = "current"
+
+    sub_url = ""
+    if prof_to_update:
+        meta_path = prof_to_update.get("meta_path")
+        if meta_path and os.path.exists(meta_path):
             try:
                 with open(meta_path, "r", encoding="utf-8") as f:
                     meta = json.load(f)
@@ -812,47 +786,68 @@ def cmd_update(args):
             pass
 
     if not sub_url:
-        print(f"{COLOR_YELLOW}[!] Current profile has no subscription URL. Update skipped.{COLOR_RESET}")
+        print(f"{COLOR_YELLOW}[!] Profile '{target_name}' has no subscription URL. Update skipped.{COLOR_RESET}")
         return 1
 
-    print(f"Updating subscription from: {sub_url} ...")
+    print(f"Updating subscription for profile '{COLOR_BOLD}{target_name}{COLOR_RESET}' from: {sub_url} ...")
     converter = get_converter_path()
     if not converter:
         print(f"{COLOR_RED}[✗] sub_converter.py not found on system.{COLOR_RESET}")
         return 1
 
-    cmd = [sys.executable, converter, "--sub", sub_url, "--output", CONFIG_PATH]
+    dest_json = os.path.join(PROFILES_DIR, f"{target_name}.json")
+    cmd = [sys.executable, converter, "--sub", sub_url, "--output", dest_json]
     ret = subprocess.run(cmd)
-    if ret.returncode == 0:
-        if current_name:
-            dest_json = os.path.join(PROFILES_DIR, f"{current_name}.json")
-            shutil.copy2(CONFIG_PATH, dest_json)
-            node_count, _, _ = inspect_config_file(dest_json)
-            meta = {
-                "name": current_name,
-                "type": "subscription",
-                "source": sub_url,
-                "node_count": node_count,
-                "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-            }
-            try:
-                with open(os.path.join(PROFILES_DIR, f"{current_name}.meta.json"), "w", encoding="utf-8") as f:
-                    json.dump(meta, f, indent=2)
-            except Exception:
-                pass
-
-        print(f"{COLOR_GREEN}[✓] Subscription updated. Restarting sing-box-client...{COLOR_RESET}")
-        subprocess.run(["systemctl", "restart", "sing-box-client"])
-        wait_for_api(5)
-        cmd_list(args)
-    else:
+    if ret.returncode != 0:
         print(f"{COLOR_RED}[✗] Failed to convert subscription.{COLOR_RESET}")
         return 1
 
+    node_count, _, _ = inspect_config_file(dest_json)
+    meta = {
+        "name": target_name,
+        "type": "subscription",
+        "source": sub_url,
+        "node_count": node_count,
+        "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    try:
+        with open(os.path.join(PROFILES_DIR, f"{target_name}.meta.json"), "w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=2)
+    except Exception:
+        pass
+
+    if target_name == current_name:
+        shutil.copy2(dest_json, CONFIG_PATH)
+        print(f"{COLOR_GREEN}[✓] Subscription updated ({node_count} nodes). Restarting primary sing-box-client...{COLOR_RESET}")
+        subprocess.run(["systemctl", "restart", "sing-box-client"])
+        wait_for_api(5)
+        cmd_list(PORT_HTTP)
+    else:
+        print(f"{COLOR_GREEN}[✓] Subscription profile '{target_name}' updated ({node_count} nodes).{COLOR_RESET}")
+
+    bound = get_bound_ports()
+    for pt, p_info in bound.items():
+        if p_info.get("profile") == target_name:
+            print(f"Restarting port {pt} with updated profile '{target_name}'...")
+            cmd_port_bind(pt, target_name, force=True)
+
+    return 0
+
 
 def cmd_sub(args):
-    new_sub = args.url
-    profile_name = getattr(args, "name", None)
+    if isinstance(args, list):
+        new_sub = args[0] if args else None
+        profile_name = args[1] if len(args) > 1 else None
+    elif isinstance(args, str):
+        new_sub = args
+        profile_name = None
+    elif args is None:
+        new_sub = None
+        profile_name = None
+    else:
+        new_sub = getattr(args, "url", None)
+        profile_name = getattr(args, "name", None)
+
     if not new_sub:
         return cmd_update(args)
 
@@ -878,15 +873,27 @@ def cmd_sub(args):
         print(f"{COLOR_GREEN}[✓] Subscription configured and saved as profile '{current_name}'. Restarting sing-box-client...{COLOR_RESET}")
         subprocess.run(["systemctl", "restart", "sing-box-client"])
         wait_for_api(5)
-        cmd_list(args)
+        cmd_list(PORT_HTTP)
+        return 0
     else:
         print(f"{COLOR_RED}[✗] Failed to convert subscription.{COLOR_RESET}")
         return 1
 
 
 def cmd_vless(args):
-    vless_uri = args.uri
-    profile_name = getattr(args, "name", None)
+    if isinstance(args, list):
+        vless_uri = args[0] if args else None
+        profile_name = args[1] if len(args) > 1 else None
+    elif isinstance(args, str):
+        vless_uri = args
+        profile_name = None
+    elif args is None:
+        vless_uri = None
+        profile_name = None
+    else:
+        vless_uri = getattr(args, "uri", None)
+        profile_name = getattr(args, "name", None)
+
     if not vless_uri:
         if sys.stdin.isatty():
             try:
@@ -895,7 +902,7 @@ def cmd_vless(args):
                 print("\nCancelled.")
                 return 0
         else:
-            print("Usage: proxy-node vless <vless://...> [profile_name]")
+            print("Usage: pnode vless <vless://...> [profile_name]")
             return 1
 
     if not vless_uri.startswith("vless://"):
@@ -927,15 +934,26 @@ def cmd_vless(args):
         print(f"{COLOR_GREEN}[✓] VLESS configured and saved as profile '{safe_name}'. Restarting sing-box-client...{COLOR_RESET}")
         subprocess.run(["systemctl", "restart", "sing-box-client"])
         wait_for_api(5)
-        cmd_list(args)
-        cmd_test(args)
+        cmd_list(PORT_HTTP)
+        cmd_test(PORT_HTTP)
+        return 0
     else:
         print(f"{COLOR_RED}[✗] Failed to configure VLESS.{COLOR_RESET}")
         return 1
 
 
 def cmd_docker(args):
-    action = args.docker_action or "status"
+    purge_all = False
+    if isinstance(args, list):
+        action = args[0].lower() if args else "status"
+        purge_all = any(x in ("--all", "-a", "all") for x in args)
+    elif isinstance(args, str):
+        action = args.lower()
+    elif args is None:
+        action = "status"
+    else:
+        action = getattr(args, "docker_action", None) or "status"
+        purge_all = getattr(args, "all", False)
     docker_config_path = "/root/.docker/config.json"
     user_docker_config = os.path.expanduser("~/.docker/config.json")
     daemon_json_path = "/etc/docker/daemon.json"
@@ -1076,7 +1094,6 @@ Environment="NO_PROXY=localhost,127.0.0.1,::1,172.16.0.0/12,192.168.0.0/16,10.0.
         return 0
 
     elif action in ("off", "disable"):
-        purge_all = getattr(args, "all", False)
         print("Disabling Docker container automatic proxy (switching to On-Demand mode)...")
         for p in (docker_config_path, user_docker_config):
             if os.path.exists(p):
@@ -1141,104 +1158,1014 @@ Environment="NO_PROXY=localhost,127.0.0.1,::1,172.16.0.0/12,192.168.0.0/16,10.0.
             return 1
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="sing-box client node and profile manager",
-        formatter_class=argparse.RawTextHelpFormatter,
-    )
-    subparsers = parser.add_subparsers(dest="action")
+def is_port_in_use(port, host="127.0.0.1"):
+    try:
+        import socket
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(0.5)
+            return s.connect_ex((host, int(port))) == 0
+    except Exception:
+        return False
 
-    # list
-    subparsers.add_parser("list", help="List all available nodes")
-    subparsers.add_parser("ls", help="Alias for list")
 
-    # switch
-    p_switch = subparsers.add_parser("switch", help="Switch proxy node by number or name")
-    p_switch.add_argument("node", nargs="?", default=None, help="Node number or name")
+def is_port_bindable(port, host="0.0.0.0"):
+    try:
+        import socket
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind((host, int(port)))
+            return True
+    except Exception:
+        return False
 
-    p_select = subparsers.add_parser("select", help="Alias for switch")
-    p_select.add_argument("node", nargs="?", default=None, help="Node number or name")
 
-    p_set = subparsers.add_parser("set", help="Alias for switch")
-    p_set.add_argument("node", nargs="?", default=None, help="Node number or name")
+def find_next_free_proxy_port(start=1081, end=1180):
+    bound = get_bound_ports()
+    for p in range(start, end):
+        if p not in bound and is_port_bindable(p):
+            return p
+    return None
 
-    # current
-    subparsers.add_parser("current", help="Show currently active node name")
 
-    # test
-    subparsers.add_parser("test", help="Test connectivity and outbound IP")
+def ensure_port_service_template():
+    if os.path.exists(PORT_SERVICE_TEMPLATE):
+        return True
+    bin_path = get_sing_box_binary() or "/usr/local/bin/sing-box"
+    content = f"""[Unit]
+Description=sing-box client service on port %I
+Documentation=https://sing-box.sagernet.org
+After=network.target nss-lookup.target network-online.target
 
-    # update
-    subparsers.add_parser("update", help="Update subscription and nodes from current profile")
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/var/lib/sing-box-client
+ExecStart={bin_path} run -c /etc/sing-box-client/ports/%I/config.json
+Restart=always
+RestartSec=3
+LimitNOFILE=infinity
 
-    # profile
-    p_prof = subparsers.add_parser("profile", help="Manage config profiles (list/use/del/save/add)")
-    p_prof.add_argument("subaction", nargs="?", default=None, help="Subcommand: list, use, del, save, add, or profile name/index")
-    p_prof.add_argument("target", nargs="?", default=None, help="Profile name or index to use/del/save")
-    p_prof.add_argument("extra", nargs="?", default=None, help="Source URL/URI/path for add")
-    p_prof.add_argument("-f", "--force", action="store_true", help="Force action without prompt")
+[Install]
+WantedBy=multi-user.target
+"""
+    try:
+        with open(PORT_SERVICE_TEMPLATE, "w", encoding="utf-8") as f:
+            f.write(content)
+        os.chmod(PORT_SERVICE_TEMPLATE, 0o644)
+        subprocess.run(["systemctl", "daemon-reload"], stderr=subprocess.DEVNULL)
+        return True
+    except Exception as e:
+        print(f"{COLOR_YELLOW}[!] Note: Could not auto-install {PORT_SERVICE_TEMPLATE}: {e}{COLOR_RESET}")
+        return False
 
-    # profiles alias
-    p_profs = subparsers.add_parser("profiles", help="Alias for 'profile list'")
-    p_profs.add_argument("subaction", nargs="?", default="list", help="Subcommand")
-    p_profs.add_argument("target", nargs="?", default=None, help="Target")
-    p_profs.add_argument("extra", nargs="?", default=None, help="Extra")
-    p_profs.add_argument("-f", "--force", action="store_true", help="Force action without prompt")
 
-    # config
-    p_cfg = subparsers.add_parser("config", help="Manage config profiles or apply config file")
-    p_cfg.add_argument("subaction", nargs="?", default=None, help="Subcommand (list/use/del/save/add), profile name, or config file path")
-    p_cfg.add_argument("target", nargs="?", default=None, help="Profile name or index")
-    p_cfg.add_argument("extra", nargs="?", default=None, help="Extra argument")
-    p_cfg.add_argument("-f", "--force", action="store_true", help="Force action without prompt")
+def get_bound_ports():
+    ensure_ports_dir()
+    bound = {}
+    if not os.path.exists(PORTS_DIR):
+        return bound
+    try:
+        entries = sorted(os.listdir(PORTS_DIR), key=lambda x: int(x) if x.isdigit() else 999999)
+    except Exception:
+        entries = []
 
-    # sub
-    p_sub = subparsers.add_parser("sub", help="Set new subscription URL or update current")
-    p_sub.add_argument("url", nargs="?", default=None, help="New subscription URL")
-    p_sub.add_argument("name", nargs="?", default=None, help="Optional profile name to save as")
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        port = int(entry)
+        port_dir = os.path.join(PORTS_DIR, entry)
+        if not os.path.isdir(port_dir):
+            continue
 
-    # vless
-    p_vless = subparsers.add_parser("vless", help="Set a single VLESS URI")
-    p_vless.add_argument("uri", nargs="?", default=None, help="vless://... URI")
-    p_vless.add_argument("name", nargs="?", default=None, help="Optional profile name to save as")
+        cfg_file = os.path.join(port_dir, "config.json")
+        info_file = os.path.join(port_dir, "info.json")
 
-    # docker
-    p_docker = subparsers.add_parser("docker", help="Manage Docker container and daemon proxy (on/off/status/test)")
-    p_docker.add_argument("docker_action", nargs="?", choices=["enable", "disable", "on", "off", "status", "test"], default="status", help="Docker proxy action")
-    p_docker.add_argument("--all", action="store_true", help="When disabling, also remove daemon pull proxy and dropin")
+        profile_name = "unknown"
+        api_port = None
+        created_at = ""
 
-    # Allow direct: `proxy-node 2` -> switches to node 2
-    if len(sys.argv) == 2 and (sys.argv[1].isdigit() or not sys.argv[1].startswith("-")):
-        if sys.argv[1] not in (
-            "list", "ls", "switch", "select", "set", "current", "test", "update",
-            "profile", "profiles", "config", "sub", "vless", "docker", "help", "-h", "--help"
-        ):
-            sys.argv.insert(1, "switch")
+        if os.path.exists(info_file):
+            try:
+                with open(info_file, "r", encoding="utf-8") as f:
+                    info_data = json.load(f)
+                profile_name = info_data.get("profile", profile_name)
+                api_port = info_data.get("api_port")
+                created_at = info_data.get("created_at", "")
+            except Exception:
+                pass
 
-    args = parser.parse_args()
+        if not api_port and os.path.exists(cfg_file):
+            try:
+                with open(cfg_file, "r", encoding="utf-8") as f:
+                    cfg_data = json.load(f)
+                ctrl = cfg_data.get("experimental", {}).get("clash_api", {}).get("external_controller", "")
+                if ":" in ctrl:
+                    api_port = int(ctrl.split(":")[-1])
+            except Exception:
+                pass
 
-    action = args.action
-    if not action or action in ("list", "ls"):
-        cmd_list(args)
-    elif action in ("switch", "select", "set"):
-        sys.exit(cmd_switch(args) or 0)
-    elif action == "current":
-        cmd_current(args)
+        is_running = False
+        try:
+            svc_name = f"sing-box-port@{port}"
+            res = subprocess.run(["systemctl", "is-active", "--quiet", svc_name])
+            is_running = (res.returncode == 0)
+        except Exception:
+            is_running = is_port_in_use(port)
+
+        active_node = ""
+        node_count = 0
+        nodes = []
+        if is_running and api_port:
+            try:
+                req = urllib.request.Request(f"http://127.0.0.1:{api_port}/proxies", headers={"User-Agent": "proxy-node/1.0"})
+                with urllib.request.urlopen(req, timeout=0.8) as resp:
+                    p_data = json.loads(resp.read().decode("utf-8"))
+                sel = p_data.get("proxies", {}).get(PROXY_TAG, {})
+                active_node = sel.get("now", "")
+                nodes = sel.get("all", [])
+                node_count = len(nodes)
+            except Exception:
+                pass
+
+        if not active_node and os.path.exists(cfg_file):
+            cnt, nds, _ = inspect_config_file(cfg_file)
+            node_count = cnt
+            nodes = nds
+            if nds:
+                active_node = nds[0]
+
+        bound[port] = {
+            "port": port,
+            "profile": profile_name,
+            "api_port": api_port,
+            "config_path": cfg_file,
+            "info_path": info_file,
+            "port_dir": port_dir,
+            "is_running": is_running,
+            "status": "RUNNING" if is_running else "STOPPED",
+            "active_node": active_node or "(none)",
+            "nodes": nodes,
+            "node_count": node_count,
+            "created_at": created_at,
+        }
+    return bound
+
+
+def get_used_api_ports():
+    used = {9090}
+    for p_info in get_bound_ports().values():
+        if p_info.get("api_port"):
+            used.add(p_info["api_port"])
+    return used
+
+
+def allocate_api_port(proxy_port):
+    used = get_used_api_ports()
+    proxy_port = int(proxy_port)
+    candidate = None
+    if 1080 < proxy_port < 1180:
+        candidate = 9000 + (proxy_port - 1080)
+    elif proxy_port > 0:
+        candidate = 9000 + (proxy_port % 1000)
+        if candidate < 9091:
+            candidate += 100
+
+    if candidate and candidate not in used and is_port_bindable(candidate, "127.0.0.1"):
+        return candidate
+
+    for p in range(9091, 9999):
+        if p not in used and is_port_bindable(p, "127.0.0.1"):
+            return p
+    return 9091
+
+
+def find_matching_node(target, all_nodes):
+    if not target:
+        return None, ""
+    target_str = str(target).strip()
+    if target_str.isdigit():
+        idx = int(target_str) - 1
+        if 0 <= idx < len(all_nodes):
+            return all_nodes[idx], ""
+        return None, "index_out_of_range"
+    # Exact match (case-insensitive)
+    for name in all_nodes:
+        if name.lower() == target_str.lower():
+            return name, ""
+    # Substring match
+    matches = [name for name in all_nodes if target_str.lower() in name.lower()]
+    if len(matches) == 1:
+        return matches[0], ""
+    elif len(matches) > 1:
+        return matches[0], f"Matched '{matches[0]}' (1 of {len(matches)} matches for '{target_str}')"
+    return None, "not_found"
+
+
+def test_single_proxy(port):
+    start = time.time()
+    try:
+        proxy_handler = urllib.request.ProxyHandler({
+            "http": f"http://127.0.0.1:{port}",
+            "https": f"http://127.0.0.1:{port}",
+        })
+        opener = urllib.request.build_opener(proxy_handler)
+        req = urllib.request.Request("https://api.ipify.org?format=json", headers={"User-Agent": "curl/7.81.0"})
+        with opener.open(req, timeout=6) as resp:
+            elapsed = int((time.time() - start) * 1000)
+            res = json.loads(resp.read().decode())
+            ip = res.get("ip", "")
+            return True, ip, elapsed
+    except Exception as e:
+        return False, str(e), 0
+
+
+def cmd_test(port=None):
+    if port:
+        try:
+            port = int(port)
+        except Exception:
+            print(f"{COLOR_RED}[✗] Invalid port '{port}'.{COLOR_RESET}")
+            return 1
+
+        bound_ports = get_bound_ports()
+        profile_label = ""
+        if port == PORT_HTTP:
+            profile_label = f" (Profile: {get_current_profile_name() or 'Primary'})"
+        elif port in bound_ports:
+            profile_label = f" (Profile: {bound_ports[port]['profile']})"
+
+        print(f"Testing connection through 127.0.0.1:{port}{profile_label} ...")
+        ok, res, latency = test_single_proxy(port)
+        if ok:
+            print(f"{COLOR_GREEN}[✓] Connection successful!{COLOR_RESET}")
+            print(f"    Outbound IP: {COLOR_BOLD}{res}{COLOR_RESET}")
+            print(f"    Latency:     {latency} ms")
+            return 0
+        else:
+            print(f"{COLOR_RED}[✗] Proxy test failed on port {port}: {res}{COLOR_RESET}")
+            return 1
+    else:
+        bound_ports = get_bound_ports()
+        all_ports = [(PORT_HTTP, get_current_profile_name() or "primary", "Primary")]
+        for p_num, p_info in sorted(bound_ports.items()):
+            all_ports.append((p_num, p_info["profile"], "Bound"))
+
+        print(f"\n{COLOR_BOLD}{COLOR_CYAN}=== Testing All Proxy Ports ({len(all_ports)} total) ==={COLOR_RESET}")
+        print("-" * 76)
+        print(f" {'Port':<8} {'Profile':<18} {'Status':<14} {'Outbound IP':<20} {'Latency'}")
+        print("-" * 76)
+        for p_num, prof, role in all_ports:
+            ok, res, latency = test_single_proxy(p_num)
+            if ok:
+                status_str = f"{COLOR_GREEN}[✓] OK{COLOR_RESET}"
+                print(f" {COLOR_BOLD}{p_num:<8}{COLOR_RESET} {prof:<18} {status_str:<23} {COLOR_BOLD}{res:<20}{COLOR_RESET} {latency} ms")
+            else:
+                status_str = f"{COLOR_RED}[✗] Failed{COLOR_RESET}"
+                err_msg = res if len(res) <= 18 else res[:16] + ".."
+                print(f" {COLOR_BOLD}{p_num:<8}{COLOR_RESET} {prof:<18} {status_str:<23} {err_msg:<20} -")
+        print("-" * 76 + "\n")
+        return 0
+
+
+def cmd_dashboard():
+    auto_init_current_profile_if_needed()
+    bound_ports = get_bound_ports()
+
+    primary_profile = get_current_profile_name() or "default"
+    primary_running = False
+    try:
+        res = subprocess.run(["systemctl", "is-active", "--quiet", "sing-box-client"])
+        primary_running = (res.returncode == 0)
+    except Exception:
+        primary_running = is_port_in_use(PORT_HTTP)
+
+    primary_node = ""
+    primary_nodes_count = 0
+    if primary_running:
+        try:
+            sel = get_current_selector()
+            primary_node = sel.get("now", "")
+            primary_nodes_count = len(sel.get("all", []))
+        except Exception:
+            pass
+    if not primary_node and os.path.exists(CONFIG_PATH):
+        cnt, nds, _ = inspect_config_file(CONFIG_PATH)
+        primary_nodes_count = cnt
+        if nds:
+            primary_node = nds[0]
+
+    print(f"\n{COLOR_BOLD}{COLOR_CYAN}=== Proxy Ports Dashboard ==={COLOR_RESET}")
+    print("-" * 84)
+    print(f" {'Port':<8} {'Profile':<18} {'Status':<12} {'Active Node':<26} {'Nodes':<8} {'Type'}")
+    print("-" * 84)
+
+    p_status_color = COLOR_GREEN if primary_running else COLOR_RED
+    p_status_str = f"{p_status_color}{'RUNNING' if primary_running else 'STOPPED':<12}{COLOR_RESET}"
+    p_node_display = primary_node if len(primary_node) <= 24 else primary_node[:22] + ".."
+    print(f" {COLOR_BOLD}{PORT_HTTP:<8}{COLOR_RESET} {primary_profile:<18} {p_status_str} {p_node_display:<26} {primary_nodes_count:<8} {COLOR_BOLD}Primary{COLOR_RESET}")
+
+    for p_num in sorted(bound_ports.keys()):
+        p_info = bound_ports[p_num]
+        b_prof = p_info["profile"]
+        b_running = p_info["is_running"]
+        b_status_color = COLOR_GREEN if b_running else COLOR_RED
+        b_status_str = f"{b_status_color}{'RUNNING' if b_running else 'STOPPED':<12}{COLOR_RESET}"
+        b_node = p_info["active_node"]
+        b_node_display = b_node if len(b_node) <= 24 else b_node[:22] + ".."
+        b_count = p_info.get("node_count", 0)
+        print(f" {COLOR_BOLD}{p_num:<8}{COLOR_RESET} {b_prof:<18} {b_status_str} {b_node_display:<26} {b_count:<8} Secondary")
+
+    print("-" * 84)
+    print(f"Quick Actions:")
+    print(f"  Switch Node:    {COLOR_CYAN}pnode [port] <#|name>{COLOR_RESET}      (e.g. 'pnode 2', 'pnode 1081 3', 'pnode 日本')")
+    print(f"  Use Profile:    {COLOR_CYAN}pnode [port] use <#|name>{COLOR_RESET}  (e.g. 'pnode use 1', 'pnode 1081 use 2')")
+    print(f"  Auto Add Port:  {COLOR_CYAN}pnode add <#|name>{COLOR_RESET}         (auto-assigns next port 1082...)")
+    print(f"  Stop Port:      {COLOR_CYAN}pnode [port] stop{COLOR_RESET}          (e.g. 'pnode 1081 stop', 'pnode stop all')")
+    print(f"  Test Ports:     {COLOR_CYAN}pnode test{COLOR_RESET}                 (test all running ports)")
+    print(f"  View Nodes:     {COLOR_CYAN}pnode [port] ls{COLOR_RESET}            (e.g. 'pnode 1081 ls')")
+    print(f"  Terminal Proxy: {COLOR_CYAN}proxy on [port]{COLOR_RESET}            (e.g. 'proxy on 1081')\n")
+    return 0
+
+
+def cmd_dashboard_or_list():
+    bound = get_bound_ports()
+    if bound:
+        cmd_dashboard()
+    else:
+        cmd_list(PORT_HTTP)
+
+
+def cmd_port_nodes(port):
+    if port == PORT_HTTP:
+        return cmd_list(PORT_HTTP)
+
+    bound_ports = get_bound_ports()
+    if port not in bound_ports:
+        print(f"{COLOR_RED}[✗] Port {port} is not bound. Start it with: pnode {port} use <profile>{COLOR_RESET}")
+        return 1
+
+    p_info = bound_ports[port]
+    api_port = p_info.get("api_port")
+    prof_name = p_info["profile"]
+
+    if not api_port or not p_info["is_running"]:
+        print(f"{COLOR_YELLOW}[!] Port {port} (Profile: '{prof_name}') service is not running.{COLOR_RESET}")
+        return 1
+
+    try:
+        req = urllib.request.Request(f"http://127.0.0.1:{api_port}/proxies", headers={"User-Agent": "proxy-node/1.0"})
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        proxies_map = data.get("proxies", {})
+        selector = proxies_map.get(PROXY_TAG, {})
+        if not selector:
+            for k, v in proxies_map.items():
+                if v.get("type") == "Selector":
+                    selector = v
+                    break
+
+        now_node = selector.get("now", "")
+        all_nodes = selector.get("all", [])
+
+        if not all_nodes:
+            print(f"\n{COLOR_BOLD}{COLOR_CYAN}=== Port {port} Profile: {prof_name} (Single Node) ==={COLOR_RESET}")
+            print(f"Active Node: {COLOR_GREEN}{COLOR_BOLD}{p_info['active_node']}{COLOR_RESET}\n")
+            return 0
+
+        print(f"\n{COLOR_BOLD}{COLOR_CYAN}=== Available Nodes on Port {port} ({prof_name}) ({len(all_nodes)} total) ==={COLOR_RESET}")
+        print("-" * 68)
+        print(f" {'#':<4} {'Type':<12} {'Status':<12} {'Node Name'}")
+        print("-" * 68)
+        for idx, name in enumerate(all_nodes, 1):
+            info = proxies_map.get(name, {})
+            ntype = info.get("type", "Proxy")
+            if name == now_node:
+                status = "[*] Active"
+                print(f" {COLOR_GREEN}{idx:<4} {ntype:<12} {status:<12} {name}{COLOR_RESET}")
+            else:
+                print(f" {idx:<4} {ntype:<12} {'':<12} {name}")
+        print("-" * 68)
+        print(f"Current active node (Port {port}): {COLOR_GREEN}{COLOR_BOLD}{now_node}{COLOR_RESET}")
+        print(f"Switch node: {COLOR_CYAN}pnode {port} <#|name>{COLOR_RESET}   (e.g. 'pnode {port} 2', 'pnode {port} 日本')\n")
+        return 0
+    except Exception as e:
+        print(f"{COLOR_RED}[✗] Cannot connect to Clash API on port {api_port}: {e}{COLOR_RESET}")
+        return 1
+
+
+def cmd_switch(port, target=None):
+    if port == PORT_HTTP:
+        api_port = 9090
+        prof_name = get_current_profile_name() or "Primary"
+        running = True
+    else:
+        bound = get_bound_ports()
+        if port not in bound:
+            print(f"{COLOR_RED}[✗] Port {port} is not bound. Run 'pnode {port} use <profile>' to start it.{COLOR_RESET}")
+            return 1
+        p_info = bound[port]
+        api_port = p_info.get("api_port")
+        prof_name = p_info.get("profile", "unknown")
+        running = p_info.get("is_running", False)
+
+    if not api_port or not running:
+        print(f"{COLOR_RED}[✗] Port {port} service is not running.{COLOR_RESET}")
+        return 1
+
+    try:
+        req = urllib.request.Request(f"http://127.0.0.1:{api_port}/proxies", headers={"User-Agent": "proxy-node/1.0"})
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        proxies_map = data.get("proxies", {})
+        selector = proxies_map.get(PROXY_TAG, {})
+        if not selector:
+            for k, v in proxies_map.items():
+                if v.get("type") == "Selector":
+                    selector = v
+                    break
+
+        all_nodes = selector.get("all", [])
+        if not all_nodes:
+            print(f"{COLOR_YELLOW}[!] Port {port} (Profile: '{prof_name}') has only a single fixed node.{COLOR_RESET}")
+            return 0
+
+        if not target:
+            if port == PORT_HTTP:
+                cmd_list(PORT_HTTP)
+            else:
+                cmd_port_nodes(port)
+
+            if sys.stdin.isatty():
+                try:
+                    choice = input(f"{COLOR_BOLD}Enter node number or name to switch on Port {port} [1-{len(all_nodes)}]: {COLOR_RESET}").strip()
+                    if not choice:
+                        print("Cancelled.")
+                        return 0
+                    target = choice
+                except (KeyboardInterrupt, EOFError):
+                    print("\nCancelled.")
+                    return 0
+            else:
+                print(f"Usage: pnode {port if port != 1080 else ''} switch <#|name>")
+                return 1
+
+        node_name, note = find_matching_node(target, all_nodes)
+        if not node_name:
+            if note == "index_out_of_range":
+                print(f"{COLOR_RED}[✗] Index out of range. Please enter 1 to {len(all_nodes)}.{COLOR_RESET}")
+            else:
+                print(f"{COLOR_RED}[✗] Node '{target}' not found on Port {port}.{COLOR_RESET}")
+            return 1
+
+        if note:
+            print(f"{COLOR_CYAN}[i] {note}{COLOR_RESET}")
+
+        data_bytes = json.dumps({"name": node_name}).encode("utf-8")
+        req_put = urllib.request.Request(
+            f"http://127.0.0.1:{api_port}/proxies/{PROXY_TAG}",
+            data=data_bytes,
+            headers={"Content-Type": "application/json", "User-Agent": "proxy-node/1.0"},
+            method="PUT",
+        )
+        with urllib.request.urlopen(req_put, timeout=5) as resp:
+            pass
+
+        print(f"{COLOR_GREEN}[✓] Port {port} successfully switched to node: {COLOR_BOLD}{node_name}{COLOR_RESET}")
+        return 0
+    except Exception as e:
+        print(f"{COLOR_RED}[✗] Failed to switch node on Port {port}: {e}{COLOR_RESET}")
+        return 1
+
+
+def cmd_current(port=1080):
+    if port == PORT_HTTP:
+        try:
+            selector = get_current_selector()
+            print(selector.get("now", "unknown"))
+        except Exception as e:
+            print(f"unknown ({e})")
+    else:
+        bound = get_bound_ports()
+        if port in bound and bound[port].get("active_node"):
+            print(bound[port]["active_node"])
+        else:
+            print("unknown")
+
+
+def cmd_port_bind(port, profile_name, force=False):
+    auto_init_current_profile_if_needed()
+    profiles = list_profiles()
+    prof = resolve_profile(profile_name, profiles)
+    if prof == "multiple":
+        return 1
+    if not prof:
+        print(f"{COLOR_RED}[✗] Profile '{profile_name}' not found. Run 'pnode profiles' to see available profiles.{COLOR_RESET}")
+        return 1
+
+    target_name = prof["name"]
+    source_json = prof["path"]
+
+    port_dir = os.path.join(PORTS_DIR, str(port))
+    svc_name = f"sing-box-port@{port}"
+    if os.path.exists(port_dir):
+        old_prof = "unknown"
+        info_f = os.path.join(port_dir, "info.json")
+        if os.path.exists(info_f):
+            try:
+                with open(info_f, "r", encoding="utf-8") as f:
+                    old_prof = json.load(f).get("profile", old_prof)
+            except Exception:
+                pass
+        if old_prof == target_name:
+            print(f"Port {port} is already running profile '{target_name}'. Updating configuration and restarting...")
+        else:
+            print(f"Switching Port {port} from '{old_prof}' to '{target_name}'...")
+    else:
+        if not is_port_bindable(port):
+            print(f"{COLOR_RED}[✗] Port {port} is already in use by another application on this system.{COLOR_RESET}")
+            return 1
+
+    try:
+        with open(source_json, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+    except Exception as e:
+        print(f"{COLOR_RED}[✗] Failed to read profile config '{source_json}': {e}{COLOR_RESET}")
+        return 1
+
+    inbounds = cfg.setdefault("inbounds", [])
+    mixed_ib = None
+    for ib in inbounds:
+        if ib.get("type") == "mixed":
+            mixed_ib = ib
+            break
+    if not mixed_ib:
+        if inbounds:
+            mixed_ib = inbounds[0]
+        else:
+            mixed_ib = {"type": "mixed", "tag": "mixed-in"}
+            inbounds.append(mixed_ib)
+    mixed_ib["listen"] = "0.0.0.0"
+    mixed_ib["listen_port"] = port
+
+    api_port = allocate_api_port(port)
+    cfg.setdefault("experimental", {})
+    cfg["experimental"]["cache_file"] = {
+        "enabled": True,
+        "path": f"/var/lib/sing-box-client/cache-{port}.db",
+    }
+    cfg["experimental"]["clash_api"] = {
+        "external_controller": f"127.0.0.1:{api_port}",
+    }
+
+    check_bin = get_sing_box_binary()
+    if check_bin:
+        tmp_cfg = f"/tmp/check-port-{port}-{os.getpid()}.json"
+        try:
+            with open(tmp_cfg, "w", encoding="utf-8") as f:
+                json.dump(cfg, f)
+            res = subprocess.run([check_bin, "check", "-c", tmp_cfg], capture_output=True, text=True)
+            if res.returncode != 0:
+                print(f"{COLOR_RED}[✗] Generated config failed sing-box validation:{COLOR_RESET}\n{res.stderr or res.stdout}")
+                return 1
+        finally:
+            if os.path.exists(tmp_cfg):
+                os.remove(tmp_cfg)
+
+    ensure_ports_dir()
+    os.makedirs(port_dir, exist_ok=True)
+    dest_json = os.path.join(port_dir, "config.json")
+    dest_info = os.path.join(port_dir, "info.json")
+
+    with open(dest_json, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2, ensure_ascii=False)
+    os.chmod(dest_json, 0o644)
+
+    with open(dest_info, "w", encoding="utf-8") as f:
+        json.dump({
+            "port": port,
+            "profile": target_name,
+            "api_port": api_port,
+            "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }, f, indent=2)
+    os.chmod(dest_info, 0o644)
+
+    ensure_port_service_template()
+
+    print(f"Starting {svc_name} on port {port} with profile '{target_name}'...")
+    subprocess.run(["systemctl", "daemon-reload"], stderr=subprocess.DEVNULL)
+    subprocess.run(["systemctl", "enable", "--now", svc_name], stderr=subprocess.DEVNULL)
+    subprocess.run(["systemctl", "restart", svc_name], stderr=subprocess.DEVNULL)
+
+    time.sleep(1)
+    res = subprocess.run(["systemctl", "is-active", "--quiet", svc_name])
+    if res.returncode != 0:
+        print(f"{COLOR_RED}[✗] Failed to start {svc_name}.{COLOR_RESET}")
+        subprocess.run(["journalctl", "-u", svc_name, "-n", "10", "--no-pager"])
+        return 1
+
+    try:
+        res = subprocess.run(["ufw", "status"], capture_output=True, text=True)
+        if "Status: active" in res.stdout:
+            subprocess.run([
+                "ufw", "allow", "from", "172.16.0.0/12", "to", "any", "port", str(port),
+                "proto", "tcp", "comment", f"Docker bridge to sing-box port {port}"
+            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
+    print(f"{COLOR_GREEN}[✓] Successfully bound port {port} to profile: {COLOR_BOLD}{target_name}{COLOR_RESET}")
+    print(f"    Proxy Address: {COLOR_BOLD}127.0.0.1:{port}{COLOR_RESET} (Mixed HTTP/SOCKS5)")
+    print(f"    Clash API:     127.0.0.1:{api_port}")
+    print(f"    Service Unit:  {svc_name} (Active & enabled on boot)")
+
+    time.sleep(0.5)
+    try:
+        req = urllib.request.Request(f"http://127.0.0.1:{api_port}/proxies", headers={"User-Agent": "proxy-node/1.0"})
+        with urllib.request.urlopen(req, timeout=1.5) as resp:
+            p_data = json.loads(resp.read().decode("utf-8"))
+        sel = p_data.get("proxies", {}).get(PROXY_TAG, {})
+        now_node = sel.get("now", "")
+        if now_node:
+            print(f"    Active Node:   {COLOR_GREEN}{now_node}{COLOR_RESET}")
+    except Exception:
+        pass
+    print()
+    return 0
+
+
+def cmd_port_unbind(port, force=False):
+    if port == PORT_HTTP:
+        print(f"{COLOR_YELLOW}[!] Port {PORT_HTTP} is the primary sing-box-client service.{COLOR_RESET}")
+        print(f"    To stop it, run: systemctl stop sing-box-client")
+        return 1
+
+    port_dir = os.path.join(PORTS_DIR, str(port))
+    if not os.path.exists(port_dir):
+        print(f"{COLOR_YELLOW}[!] Port {port} is not running or bound in {PORTS_DIR}.{COLOR_RESET}")
+        return 1
+
+    profile_name = "unknown"
+    info_f = os.path.join(port_dir, "info.json")
+    if os.path.exists(info_f):
+        try:
+            with open(info_f, "r", encoding="utf-8") as f:
+                profile_name = json.load(f).get("profile", profile_name)
+        except Exception:
+            pass
+
+    svc_name = f"sing-box-port@{port}"
+    print(f"Stopping and disabling {svc_name} (Port {port}, Profile: '{profile_name}')...")
+    subprocess.run(["systemctl", "stop", svc_name], stderr=subprocess.DEVNULL)
+    subprocess.run(["systemctl", "disable", svc_name], stderr=subprocess.DEVNULL)
+    subprocess.run(["systemctl", "reset-failed", svc_name], stderr=subprocess.DEVNULL)
+
+    shutil.rmtree(port_dir, ignore_errors=True)
+
+    cache_file = f"/var/lib/sing-box-client/cache-{port}.db"
+    if os.path.exists(cache_file):
+        try:
+            os.remove(cache_file)
+        except Exception:
+            pass
+
+    print(f"{COLOR_GREEN}[✓] Successfully stopped and unbound port {port} (was '{profile_name}').{COLOR_RESET}")
+    return 0
+
+
+def cmd_use(port, profile_target, force=False):
+    auto_init_current_profile_if_needed()
+    profiles = list_profiles()
+    if not profiles:
+        print(f"{COLOR_RED}[✗] No profiles found. Add a profile first with 'pnode profile add'.{COLOR_RESET}")
+        return 1
+
+    if not profile_target:
+        if sys.stdin.isatty():
+            cmd_profile_list()
+            try:
+                profile_target = input(f"{COLOR_BOLD}Enter profile number or name for Port {port} [1-{len(profiles)}]: {COLOR_RESET}").strip()
+                if not profile_target:
+                    print("Cancelled.")
+                    return 0
+            except (KeyboardInterrupt, EOFError):
+                print("\nCancelled.")
+                return 0
+        else:
+            print(f"Usage: pnode {port if port != 1080 else ''} use <profile>")
+            return 1
+
+    prof = resolve_profile(profile_target, profiles)
+    if prof == "multiple":
+        return 1
+    if not prof:
+        print(f"{COLOR_RED}[✗] Profile '{profile_target}' not found. Run 'pnode profiles' to see available profiles.{COLOR_RESET}")
+        return 1
+
+    target_name = prof["name"]
+
+    if port == PORT_HTTP:
+        return cmd_profile_use(target_name)
+    else:
+        return cmd_port_bind(port, target_name, force=force)
+
+
+def cmd_add_auto_port(profile_target, force=False):
+    auto_init_current_profile_if_needed()
+    profiles = list_profiles()
+    if not profiles:
+        print(f"{COLOR_RED}[✗] No profiles found. Add a profile first with 'pnode profile add'.{COLOR_RESET}")
+        return 1
+
+    next_port = find_next_free_proxy_port(1081, 1180)
+    if not next_port:
+        print(f"{COLOR_RED}[✗] No free proxy ports found in range 1081-1180.{COLOR_RESET}")
+        return 1
+
+    if not profile_target:
+        if sys.stdin.isatty():
+            cmd_profile_list()
+            try:
+                profile_target = input(f"{COLOR_BOLD}Enter profile number or name to start on Port {next_port} [1-{len(profiles)}]: {COLOR_RESET}").strip()
+                if not profile_target:
+                    print("Cancelled.")
+                    return 0
+            except (KeyboardInterrupt, EOFError):
+                print("\nCancelled.")
+                return 0
+        else:
+            print("Usage: pnode add <profile>")
+            return 1
+
+    prof = resolve_profile(profile_target, profiles)
+    if prof == "multiple":
+        return 1
+    if not prof:
+        print(f"{COLOR_RED}[✗] Profile '{profile_target}' not found. Run 'pnode profiles' to see available profiles.{COLOR_RESET}")
+        return 1
+
+    ret = cmd_port_bind(next_port, prof["name"], force=force)
+    if ret == 0:
+        print(f"Tip: run '{COLOR_CYAN}proxy on {next_port}{COLOR_RESET}' to route your current shell through this port.\n")
+    return ret
+
+
+def cmd_stop_all(force=False):
+    bound = get_bound_ports()
+    if not bound:
+        print("No secondary ports currently running.")
+        return 0
+    ports = sorted(bound.keys())
+    if not force and sys.stdin.isatty():
+        try:
+            confirm = input(f"Stop and unbind all secondary ports ({', '.join(map(str, ports))})? [y/N]: ").strip().lower()
+            if confirm not in ("y", "yes"):
+                print("Cancelled.")
+                return 0
+        except (KeyboardInterrupt, EOFError):
+            print("\nCancelled.")
+            return 0
+    for p in ports:
+        cmd_port_unbind(p, force=True)
+    print(f"{COLOR_GREEN}[✓] All secondary ports stopped. Primary port 1080 remains running.{COLOR_RESET}")
+    return 0
+
+
+def cmd_stop(target=None, force=False):
+    if target == "all":
+        return cmd_stop_all(force=force)
+
+    if target:
+        try:
+            port = int(target)
+            return cmd_port_unbind(port, force=force)
+        except ValueError:
+            pass
+
+    bound = get_bound_ports()
+    if not bound:
+        print(f"{COLOR_YELLOW}[!] No secondary ports currently running to stop.{COLOR_RESET}")
+        return 0
+
+    if sys.stdin.isatty():
+        cmd_dashboard()
+        try:
+            choice = input(f"{COLOR_BOLD}Enter port to stop (or 'all'): {COLOR_RESET}").strip()
+            if not choice:
+                print("Cancelled.")
+                return 0
+            if choice.lower() == "all":
+                return cmd_stop_all(force=force)
+            else:
+                return cmd_port_unbind(int(choice), force=force)
+        except (KeyboardInterrupt, EOFError):
+            print("\nCancelled.")
+            return 0
+    else:
+        print("Usage: pnode [port] stop | pnode stop <port|all>")
+        return 1
+
+
+def cmd_run(port, cmd_args):
+    if not cmd_args:
+        print("Usage: pnode [port] run <command...>")
+        print("Example: pnode 1081 run curl -s https://api.ipify.org")
+        return 1
+    env = os.environ.copy()
+    proxy_url = f"http://127.0.0.1:{port}"
+    socks_url = f"socks5://127.0.0.1:{port}"
+    env["http_proxy"] = proxy_url
+    env["https_proxy"] = proxy_url
+    env["HTTP_PROXY"] = proxy_url
+    env["HTTPS_PROXY"] = proxy_url
+    env["all_proxy"] = socks_url
+    env["ALL_PROXY"] = socks_url
+    try:
+        res = subprocess.run(cmd_args, env=env)
+        return res.returncode
+    except Exception as e:
+        print(f"{COLOR_RED}[✗] Failed to run command: {e}{COLOR_RESET}")
+        return 1
+
+
+def handle_profile_cmd(sub_args, force=False):
+    if not sub_args or sub_args[0] in ("list", "ls"):
+        return cmd_profile_list()
+    action = sub_args[0].lower()
+    target = sub_args[1] if len(sub_args) > 1 else None
+    extra = sub_args[2] if len(sub_args) > 2 else None
+
+    if action in ("add", "new"):
+        return cmd_profile_add(target, extra)
+    elif action in ("del", "rm", "delete"):
+        return cmd_profile_del(target, force=force)
+    elif action in ("save", "add-current"):
+        return cmd_profile_save(target)
+    elif action == "use":
+        return cmd_use(PORT_HTTP, target, force=force)
+    else:
+        profiles = list_profiles()
+        prof = resolve_profile(sub_args[0], profiles)
+        if prof and prof != "multiple":
+            return cmd_use(PORT_HTTP, prof["name"], force=force)
+        print(f"Unknown profile command: {sub_args[0]}")
+        print("Commands: pnode profiles | pnode profile add | pnode profile del | pnode profile save")
+        return 1
+
+
+def cmd_port_legacy(sub_args, force=False):
+    if not sub_args or sub_args[0].lower() in ("list", "ls", "status"):
+        return cmd_dashboard()
+    action = sub_args[0].lower()
+    if action in ("bind", "add"):
+        if len(sub_args) >= 3 and sub_args[1].isdigit():
+            return cmd_port_bind(int(sub_args[1]), sub_args[2], force=force)
+        elif len(sub_args) >= 2:
+            return cmd_add_auto_port(sub_args[1], force=force)
+        return cmd_add_auto_port(None, force=force)
+    elif action in ("unbind", "del", "stop", "rm"):
+        if len(sub_args) >= 2:
+            return cmd_stop(sub_args[1], force=force)
+        return cmd_stop(force=force)
     elif action == "test":
-        sys.exit(cmd_test(args) or 0)
-    elif action == "update":
-        sys.exit(cmd_update(args) or 0)
-    elif action in ("profile", "profiles"):
-        sys.exit(cmd_profile(args) or 0)
-    elif action == "config":
-        sys.exit(cmd_config(args) or 0)
-    elif action == "sub":
-        sys.exit(cmd_sub(args) or 0)
-    elif action == "vless":
-        sys.exit(cmd_vless(args) or 0)
-    elif action == "docker":
-        sys.exit(cmd_docker(args) or 0)
+        p = int(sub_args[1]) if len(sub_args) > 1 and sub_args[1].isdigit() else None
+        return cmd_test(p)
+    elif action.isdigit():
+        return cmd_list(int(action))
+    return cmd_dashboard()
+
+
+def print_help():
+    help_text = f"""{COLOR_BOLD}{COLOR_CYAN}sing-box client - Unified Proxy Manager (pnode){COLOR_RESET}
+
+{COLOR_BOLD}Usage:{COLOR_RESET}
+  pnode [port] <command> [args...]
+
+{COLOR_BOLD}Quick Node & Dashboard:{COLOR_RESET}
+  {COLOR_CYAN}pnode{COLOR_RESET}                      Dashboard (multi-port) or active nodes (single-port)
+  {COLOR_CYAN}pnode <#|name>{COLOR_RESET}             Switch node on 1080 (e.g. 'pnode 2', 'pnode 日本')
+  {COLOR_CYAN}pnode <port> <#|name>{COLOR_RESET}      Switch node on specific port (e.g. 'pnode 1081 2')
+  {COLOR_CYAN}pnode [port] ls{COLOR_RESET}            List all available nodes on port (default: 1080)
+  {COLOR_CYAN}pnode [port] switch{COLOR_RESET}        Interactive node selector
+  {COLOR_CYAN}pnode [port] current{COLOR_RESET}       Show active node name
+
+{COLOR_BOLD}Profile & Port Management:{COLOR_RESET}
+  {COLOR_CYAN}pnode use <#|name>{COLOR_RESET}        Switch profile on 1080 (e.g. 'pnode use 1', 'pnode use hk')
+  {COLOR_CYAN}pnode <port> use <#|name>{COLOR_RESET} Mount profile on specific port (e.g. 'pnode 1081 use 2')
+  {COLOR_CYAN}pnode add <#|name>{COLOR_RESET}        Auto-allocate next free port and start profile
+  {COLOR_CYAN}pnode <port> stop{COLOR_RESET}         Stop and unbind port (or: 'pnode stop <port>')
+  {COLOR_CYAN}pnode stop all{COLOR_RESET}            Stop all secondary ports (keep 1080)
+
+{COLOR_BOLD}Profile Library:{COLOR_RESET}
+  {COLOR_CYAN}pnode profiles{COLOR_RESET}             List all configured profiles (alias: pnode p)
+  {COLOR_CYAN}pnode profile add <name> <src>{COLOR_RESET} Add profile from subscription URL / VLESS / file
+  {COLOR_CYAN}pnode profile del <#|name>{COLOR_RESET} Delete a profile
+  {COLOR_CYAN}pnode profile save <name>{COLOR_RESET}  Save active configuration as named profile
+  {COLOR_CYAN}pnode update [profile]{COLOR_RESET}     Update subscription nodes
+
+{COLOR_BOLD}Diagnostics & Tools:{COLOR_RESET}
+  {COLOR_CYAN}pnode test{COLOR_RESET}                 Test connectivity and latency across ALL active ports
+  {COLOR_CYAN}pnode [port] test{COLOR_RESET}          Test connectivity on specific port (e.g. 'pnode 1081 test')
+  {COLOR_CYAN}pnode [port] run <cmd...>{COLOR_RESET}  Run command with proxy environment injected
+  {COLOR_CYAN}pnode docker [action]{COLOR_RESET}      Manage Docker container proxy (status|on|off|test)
+
+{COLOR_BOLD}Shell Integration:{COLOR_RESET}
+  {COLOR_CYAN}proxy on [port]{COLOR_RESET}            Enable proxy in current shell (default: 1080, e.g. 'proxy on 1081')
+  {COLOR_CYAN}proxy off{COLOR_RESET}                  Disable proxy in current shell
+  {COLOR_CYAN}proxy status{COLOR_RESET}               Show current shell proxy status
+  {COLOR_CYAN}proxy test [port]{COLOR_RESET}          Test current shell proxy connection
+"""
+    print(help_text)
+
+
+def main():
+    raw_args = sys.argv[1:]
+
+    # Check help
+    if any(arg in ("-h", "--help", "help") for arg in raw_args):
+        print_help()
+        sys.exit(0)
+
+    # Check force
+    force = False
+    args = []
+    for arg in raw_args:
+        if arg in ("-f", "--force"):
+            force = True
+        else:
+            args.append(arg)
+
+    if not args:
+        cmd_dashboard_or_list()
+        sys.exit(0)
+
+    # Check if first arg is a port (>= 1024)
+    port = PORT_HTTP
+    has_explicit_port = False
+    if args[0].isdigit() and int(args[0]) >= 1024:
+        port = int(args[0])
+        has_explicit_port = True
+        args = args[1:]
+
+    if not args:
+        if has_explicit_port:
+            sys.exit(cmd_list(port) or 0)
+        else:
+            cmd_dashboard_or_list()
+            sys.exit(0)
+
+    cmd = args[0].lower()
+    sub_args = args[1:]
+
+    if cmd in ("dashboard", "dash", "status"):
+        sys.exit(cmd_dashboard() or 0)
+    elif cmd in ("ls", "list"):
+        sys.exit(cmd_list(port) or 0)
+    elif cmd in ("current", "cur"):
+        cmd_current(port)
+    elif cmd == "switch":
+        node_target = sub_args[0] if sub_args else None
+        sys.exit(cmd_switch(port, node_target) or 0)
+    elif cmd == "use":
+        prof_target = sub_args[0] if sub_args else None
+        dest_p = port
+        if len(sub_args) > 1 and sub_args[1].isdigit() and int(sub_args[1]) >= 1024:
+            dest_p = int(sub_args[1])
+        sys.exit(cmd_use(dest_p, prof_target, force=force) or 0)
+    elif cmd == "add":
+        prof_target = sub_args[0] if sub_args else None
+        sys.exit(cmd_add_auto_port(prof_target, force=force) or 0)
+    elif cmd in ("stop", "rm", "del-port", "unbind"):
+        target = sub_args[0] if sub_args else (str(port) if has_explicit_port else None)
+        sys.exit(cmd_stop(target, force=force) or 0)
+    elif cmd == "test":
+        test_p = port if has_explicit_port else None
+        if sub_args and sub_args[0].isdigit():
+            test_p = int(sub_args[0])
+        sys.exit(cmd_test(test_p) or 0)
+    elif cmd == "run":
+        sys.exit(cmd_run(port, sub_args) or 0)
+    elif cmd in ("profiles", "profile", "p"):
+        sys.exit(handle_profile_cmd(sub_args, force=force) or 0)
+    elif cmd in ("update", "up"):
+        target = sub_args[0] if sub_args else None
+        sys.exit(cmd_update(target) or 0)
+    elif cmd in ("sub", "subscription"):
+        sys.exit(cmd_sub(sub_args) or 0)
+    elif cmd == "vless":
+        sys.exit(cmd_vless(sub_args) or 0)
+    elif cmd == "docker":
+        sys.exit(cmd_docker(sub_args) or 0)
+    elif cmd in ("port", "ports"):
+        sys.exit(cmd_port_legacy(sub_args, force=force) or 0)
+    elif len(args) == 1:
+        # Direct node switch: e.g. `pnode 2` or `pnode 1081 3` or `pnode 日本`
+        sys.exit(cmd_switch(port, args[0]) or 0)
+    else:
+        print(f"{COLOR_RED}Unknown command: {' '.join(raw_args)}{COLOR_RESET}")
+        print("Run 'pnode --help' for usage instructions.")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
     main()
+
