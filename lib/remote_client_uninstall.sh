@@ -45,6 +45,13 @@ $SUDO rm -rf /etc/sing-box-client /var/lib/sing-box-client
 $SUDO rm -f /usr/local/bin/proxy-node /usr/local/bin/pnode /usr/local/bin/dproxy
 $SUDO rm -f /etc/profile.d/singbox-proxy.sh
 
+# Clean up docker proxy dropin if present
+if [[ -e "/etc/systemd/system/docker.service.d/sing-box-client.conf" ]]; then
+    $SUDO rm -f "/etc/systemd/system/docker.service.d/sing-box-client.conf"
+    $SUDO systemctl daemon-reload
+    $SUDO systemctl restart docker 2>/dev/null || true
+fi
+
 # Clean up ~/.bashrc
 USER_BASHRC="$HOME/.bashrc"
 if [[ -f "$USER_BASHRC" ]]; then

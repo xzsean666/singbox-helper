@@ -159,22 +159,9 @@ no_proxy=localhost,127.0.0.1,::1,172.16.0.0/12,192.168.0.0/16,10.0.0.0/8
 EOF
 $SUDO chmod 0644 "${CONFIG_DIR}/docker-proxy.env"
 
-# If docker is installed, configure daemon pull proxy and boot order
-if command -v docker >/dev/null 2>&1; then
-    $SUDO mkdir -p /etc/systemd/system/docker.service.d
-    $SUDO tee /etc/systemd/system/docker.service.d/sing-box-client.conf >/dev/null <<EOF
-[Unit]
-After=sing-box-client.service
-Wants=sing-box-client.service
+# Note: Docker proxy is set to OFF by default on install.
+# Run 'pnode docker pull' to enable image pull acceleration or 'pnode docker all' for global container proxy.
 
-[Service]
-Environment="HTTP_PROXY=http://127.0.0.1:${PORT}"
-Environment="HTTPS_PROXY=http://127.0.0.1:${PORT}"
-Environment="NO_PROXY=localhost,127.0.0.1,::1,172.16.0.0/12,192.168.0.0/16,10.0.0.0/8"
-EOF
-    $SUDO systemctl daemon-reload 2>/dev/null || true
-    $SUDO systemctl restart docker 2>/dev/null || true
-fi
 
 # Install proxy-node CLI tool and dproxy helper
 $SUDO cp "${SETUP_DIR}/proxy-node" /usr/local/bin/proxy-node
