@@ -1171,11 +1171,12 @@ Environment="NO_PROXY=localhost,127.0.0.1,::1,172.16.0.0/12,192.168.0.0/16,10.0.
     elif action == "test":
         print("Testing Docker container internet connection...")
         try:
+            test_cmd = "curl -s --connect-timeout 5 http://myip.ipip.net 2>/dev/null || curl -s --connect-timeout 5 https://api.ipify.org"
             out = subprocess.check_output(
-                ["docker", "run", "--rm", "curlimages/curl:latest", "-s", "https://api.ipify.org"],
+                ["docker", "run", "--rm", "curlimages/curl:latest", "sh", "-c", test_cmd],
                 timeout=15,
             ).decode().strip()
-            print(f"{COLOR_GREEN}[✓] Default container test outbound IP: {out}{COLOR_RESET}")
+            print(f"{COLOR_GREEN}[✓] Default container outbound info:\n    {out}{COLOR_RESET}")
         except Exception as e:
             print(f"{COLOR_RED}[✗] Default container test failed: {e}{COLOR_RESET}")
 
