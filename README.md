@@ -236,7 +236,34 @@ proxy status
 proxy test
 ```
 
+#### 6. Docker Proxy Management (`pnode docker [mode]`)
+
+`pnode` provides 3 explicit states to cleanly separate Docker image pull acceleration from container traffic:
+
+```bash
+# View current Docker proxy status & mode:
+pnode docker status
+
+# Mode 1 - Global: All containers auto-proxied + Docker pull accelerated
+pnode docker all
+
+# Mode 2 - Pull-Only (Recommended): Docker pull accelerated, Containers default to Direct (On-Demand)
+pnode docker pull
+
+# Mode 3 - Disabled: Completely turn off all Docker proxying
+pnode docker off
+
+# Test container outbound connectivity:
+pnode docker test
+```
+
+> [!TIP]
+> Under **Mode 2 (Pull-Only)**, containers connect directly by default so background services won't accidentally drain your proxy bandwidth. When you need a container to use proxy, use:
+> - `dproxy run -it ...` (CLI shortcut)
+> - Or add `HTTP_PROXY=http://172.17.0.1:1080` to your `docker-compose.yml`.
+
 ### Uninstalling Client
+
 
 ```bash
 ./uninstall-client.sh "ssh root@client.ip"

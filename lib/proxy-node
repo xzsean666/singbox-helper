@@ -943,17 +943,14 @@ def cmd_vless(args):
 
 
 def cmd_docker(args):
-    purge_all = False
+    action = "status"
     if isinstance(args, list):
         action = args[0].lower() if args else "status"
-        purge_all = any(x in ("--all", "-a", "all") for x in args)
     elif isinstance(args, str):
         action = args.lower()
-    elif args is None:
-        action = "status"
-    else:
+    elif args is not None:
         action = getattr(args, "docker_action", None) or "status"
-        purge_all = getattr(args, "all", False)
+
     docker_config_path = "/root/.docker/config.json"
     user_docker_config = os.path.expanduser("~/.docker/config.json")
     daemon_json_path = "/etc/docker/daemon.json"
@@ -961,9 +958,73 @@ def cmd_docker(args):
     systemd_dropin = os.path.join(docker_service_dir, "sing-box-client.conf")
     legacy_dropin = os.path.join(docker_service_dir, "http-proxy.conf")
 
-    if action == "status":
+    def _remove_client_proxies():
+        for p in (docker_config_path, user_docker_config):
+            if os.path.exists(p):
+                try:
+                    with open(p, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    if "proxies" in data:
+                        del data["proxies"]
+                    if data:
+                        with open(p, "w", encoding="utf-8") as f:
+                            json.dump(data, f, indent=2)
+                    else:
+                        os.remove(p)
+                except Exception:
+                    pass
+
+    def _remove_daemon_json_proxies():
+        if os.path.exists(daemon_json_path):
+            try:
+                with open(daemon_json_path, "r", encoding="utf-8") as f:
+                    d_cfg = json.load(f)
+                if "proxies" in d_cfg:
+                    del d_cfg["proxies"]
+                with open(daemon_json_path, "w", encoding="utf-8") as f:
+                    json.dump(d_cfg, f, indent=2)
+            except Exception:
+                pass
+
+    def _set_daemon_dropin():
+        os.makedirs(docker_service_dir, exist_ok=True)
+        dropin_content = f"""[Unit]
+After=sing-box-client.service
+Wants=sing-box-client.service
+
+[Service]
+Environment="HTTP_PROXY=http://127.0.0.1:{PORT_HTTP}"
+Environment="HTTPS_PROXY=http://127.0.0.1:{PORT_HTTP}"
+Environment="NO_PROXY=localhost,127.0.0.1,::1,172.16.0.0/12,192.168.0.0/16,10.0.0.0/8"
+"""
+        with open(systemd_dropin, "w", encoding="utf-8") as f:
+            f.write(dropin_content)
+
+    def _remove_daemon_dropin():
+        for dropin in (systemd_dropin, legacy_dropin):
+            if os.path.exists(dropin):
+                try:
+                    os.remove(dropin)
+                except Exception:
+                    pass
+
+    def _get_docker_gw():
+        gw = "172.17.0.1"
+        try:
+            out = subprocess.check_output(
+                "ip -4 addr show docker0 | grep -oP '(?<=inet\\s)\\d+(\\.\\d+){3}' || true",
+                shell=True
+            ).decode().strip()
+            if out:
+                gw = out.split()[0]
+        except Exception:
+            pass
+        return gw
+
+    if action in ("status", "info"):
         print(f"\n{COLOR_BOLD}{COLOR_CYAN}=== Docker Proxy Status ==={COLOR_RESET}")
         has_client_proxy = False
+        client_proxy_url = ""
         for p in (docker_config_path, user_docker_config):
             if os.path.exists(p):
                 try:
@@ -971,54 +1032,49 @@ def cmd_docker(args):
                         data = json.load(f)
                     if "proxies" in data and "default" in data["proxies"]:
                         has_client_proxy = True
-                        print(f"Container Mode:           {COLOR_GREEN}GLOBAL (All containers auto-proxied via {data['proxies']['default'].get('httpProxy')}){COLOR_RESET}")
+                        client_proxy_url = data["proxies"]["default"].get("httpProxy", "")
                         break
                 except Exception:
                     pass
-        if not has_client_proxy:
-            print(f"Container Mode:           {COLOR_YELLOW}ON-DEMAND (Containers default to Direct connection){COLOR_RESET}")
-            print(f"  - On-Demand Command:    {COLOR_CYAN}dproxy run ...{COLOR_RESET}  (or --env-file /etc/sing-box-client/docker-proxy.env)")
-            print(f"  - Enable for ALL:       {COLOR_CYAN}pnode docker on{COLOR_RESET}")
 
-        has_boot_order = os.path.exists(systemd_dropin)
-        if has_boot_order:
-            print(f"Boot Auto-Start Order:    {COLOR_GREEN}ENABLED (docker.service starts After sing-box-client){COLOR_RESET}")
-        else:
-            print(f"Boot Auto-Start Order:    {COLOR_YELLOW}DISABLED{COLOR_RESET}")
-
-        has_daemon_proxy = False
-        if os.path.exists(daemon_json_path):
+        has_daemon_proxy = os.path.exists(systemd_dropin) or os.path.exists(legacy_dropin)
+        if not has_daemon_proxy and os.path.exists(daemon_json_path):
             try:
                 with open(daemon_json_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                if "proxies" in data:
+                if "proxies" in data and data["proxies"]:
                     has_daemon_proxy = True
             except Exception:
                 pass
-        if os.path.exists(systemd_dropin) or os.path.exists(legacy_dropin):
-            has_daemon_proxy = True
-        if has_daemon_proxy:
-            print(f"Docker Daemon Pull Proxy: {COLOR_GREEN}ENABLED (docker pull accelerated via 127.0.0.1:{PORT_HTTP}){COLOR_RESET}")
-        else:
-            print(f"Docker Daemon Pull Proxy: {COLOR_YELLOW}DISABLED{COLOR_RESET}")
 
-        print(f"\nCommands:")
-        print(f"  {COLOR_CYAN}pnode docker on{COLOR_RESET}       - Auto-route all containers through proxy")
-        print(f"  {COLOR_CYAN}pnode docker off{COLOR_RESET}      - Switch to On-Demand mode (containers direct)")
-        print(f"  {COLOR_CYAN}pnode docker status{COLOR_RESET}   - Show Docker proxy configuration")
-        print(f"  {COLOR_CYAN}pnode docker test{COLOR_RESET}     - Test Docker container connectivity\n")
+        if has_client_proxy:
+            mode_name = f"{COLOR_GREEN}ALL (Global Mode){COLOR_RESET}"
+            mode_summary = f"All containers auto-proxied via {client_proxy_url} + Image pulls accelerated"
+        elif has_daemon_proxy:
+            mode_name = f"{COLOR_CYAN}PULL-ONLY (On-Demand Mode){COLOR_RESET}"
+            mode_summary = "Image pulls accelerated via proxy, containers connect directly by default"
+        else:
+            mode_name = f"{COLOR_YELLOW}OFF (Disabled){COLOR_RESET}"
+            mode_summary = "Completely disabled (both image pulls and containers connect directly)"
+
+        print(f"Current Mode:             {mode_name}")
+        print(f"Summary:                  {mode_summary}")
+        print(f"  - Docker Image Pull:    {COLOR_GREEN if has_daemon_proxy else COLOR_YELLOW}{'ENABLED (http://127.0.0.1:' + str(PORT_HTTP) + ')' if has_daemon_proxy else 'DIRECT (No proxy)'}{COLOR_RESET}")
+        print(f"  - Container Default:    {COLOR_GREEN if has_client_proxy else COLOR_CYAN}{'PROXIED (Auto-injected)' if has_client_proxy else 'DIRECT (On-Demand via dproxy / compose)'}{COLOR_RESET}")
+        print(f"  - Boot Dependency:      {COLOR_GREEN if has_daemon_proxy else COLOR_YELLOW}{'ENABLED (starts after sing-box-client)' if has_daemon_proxy else 'DISABLED'}{COLOR_RESET}")
+
+        print(f"\n{COLOR_BOLD}Available Modes (3 States):{COLOR_RESET}")
+        print(f"  1. {COLOR_CYAN}pnode docker all{COLOR_RESET}        - Global: Both Image Pulls & Containers auto-proxied")
+        print(f"  2. {COLOR_CYAN}pnode docker pull{COLOR_RESET}       - Pull-Only: Image Pulls accelerated, Containers default to Direct (On-Demand)")
+        print(f"  3. {COLOR_CYAN}pnode docker off{COLOR_RESET}        - Disabled: Completely turn off all Docker proxying")
+        print(f"\nDiagnostics:")
+        print(f"  {COLOR_CYAN}pnode docker status{COLOR_RESET}     - Show this status")
+        print(f"  {COLOR_CYAN}pnode docker test{COLOR_RESET}       - Test Docker container connectivity\n")
         return 0
 
-    elif action in ("on", "enable"):
-        print("Enabling automatic proxy for all Docker containers & boot auto-start...")
-        gw = "172.17.0.1"
-        try:
-            out = subprocess.check_output("ip -4 addr show docker0 | grep -oP '(?<=inet\\s)\\d+(\\.\\d+){3}' || true", shell=True).decode().strip()
-            if out:
-                gw = out.split()[0]
-        except Exception:
-            pass
-
+    elif action in ("all", "global", "on", "enable"):
+        print("Switching Docker proxy to [Mode 1: ALL (Global)]...")
+        gw = _get_docker_gw()
         proxy_url = f"http://{gw}:{PORT_HTTP}"
         cfg_obj = {
             "proxies": {
@@ -1045,117 +1101,99 @@ def cmd_docker(args):
             except Exception as e:
                 print(f"Warning: could not write {p}: {e}")
 
-        # Systemd drop-in to ensure docker daemon uses proxy and starts After sing-box-client
+        # Set up daemon pull proxy drop-in
         try:
-            os.makedirs(docker_service_dir, exist_ok=True)
-            dropin_content = f"""[Unit]
-After=sing-box-client.service
-Wants=sing-box-client.service
-
-[Service]
-Environment="HTTP_PROXY=http://127.0.0.1:{PORT_HTTP}"
-Environment="HTTPS_PROXY=http://127.0.0.1:{PORT_HTTP}"
-Environment="NO_PROXY=localhost,127.0.0.1,::1,172.16.0.0/12,192.168.0.0/16,10.0.0.0/8"
-"""
-            with open(systemd_dropin, "w", encoding="utf-8") as f:
-                f.write(dropin_content)
+            _set_daemon_dropin()
         except Exception as e:
             print(f"Warning: could not write systemd dropin: {e}")
 
-        # Daemon proxy in daemon.json if present
-        if os.path.exists(daemon_json_path):
-            try:
-                with open(daemon_json_path, "r", encoding="utf-8") as f:
-                    d_cfg = json.load(f)
-                d_cfg.setdefault("proxies", {})
-                d_cfg["proxies"]["http-proxy"] = f"http://127.0.0.1:{PORT_HTTP}"
-                d_cfg["proxies"]["https-proxy"] = f"http://127.0.0.1:{PORT_HTTP}"
-                d_cfg["proxies"]["no-proxy"] = "localhost,127.0.0.1,::1,172.16.0.0/12,192.168.0.0/16,10.0.0.0/8"
-                with open(daemon_json_path, "w", encoding="utf-8") as f:
-                    json.dump(d_cfg, f, indent=2)
-            except Exception:
-                pass
+        # Clean daemon.json proxies to avoid docker 23+ daemon-level issues
+        _remove_daemon_json_proxies()
 
         # UFW rule
         subprocess.run(f"ufw allow from 172.16.0.0/12 to any port {PORT_HTTP} proto tcp comment 'Docker bridge to sing-box client' >/dev/null 2>&1 || true", shell=True)
 
-        # Ensure services are enabled on boot
+        # Enable services
         subprocess.run(["systemctl", "enable", "sing-box-client"], stderr=subprocess.DEVNULL)
         subprocess.run(["systemctl", "enable", "docker"], stderr=subprocess.DEVNULL)
 
-        # Restart docker
         print("Restarting Docker service...")
         subprocess.run(["systemctl", "daemon-reload"])
         subprocess.run(["systemctl", "restart", "docker"])
-        print(f"{COLOR_GREEN}[✓] Docker global proxy ENABLED (Auto-starts on boot!){COLOR_RESET}")
-        print(f"    - Containers:     All new containers will use {COLOR_BOLD}{proxy_url}{COLOR_RESET}")
-        print(f"    - Image Pulls:    docker pull will use {COLOR_BOLD}http://127.0.0.1:{PORT_HTTP}{COLOR_RESET}")
-        print(f"    - Boot Order:     docker.service will automatically wait for sing-box-client")
+        print(f"{COLOR_GREEN}[✓] Docker proxy switched to: ALL (Global Mode){COLOR_RESET}")
+        print(f"    - Containers:  All containers automatically routed via {COLOR_BOLD}{proxy_url}{COLOR_RESET}")
+        print(f"    - Image Pulls: docker pull accelerated via {COLOR_BOLD}http://127.0.0.1:{PORT_HTTP}{COLOR_RESET}")
         return 0
 
-    elif action in ("off", "disable"):
-        print("Disabling Docker container automatic proxy (switching to On-Demand mode)...")
-        for p in (docker_config_path, user_docker_config):
-            if os.path.exists(p):
-                try:
-                    with open(p, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                    if "proxies" in data:
-                        del data["proxies"]
-                    if data:
-                        with open(p, "w", encoding="utf-8") as f:
-                            json.dump(data, f, indent=2)
-                    else:
-                        os.remove(p)
-                except Exception:
-                    pass
+    elif action in ("pull", "pull-only", "pullonly", "daemon", "ondemand", "on-demand"):
+        print("Switching Docker proxy to [Mode 2: PULL-ONLY (On-Demand)]...")
+        # 1. Remove client/container auto-injection
+        _remove_client_proxies()
+        _remove_daemon_json_proxies()
 
-        if purge_all:
-            print("Purging Docker daemon pull proxy & systemd dropin...")
-            if os.path.exists(systemd_dropin):
-                try:
-                    os.remove(systemd_dropin)
-                except Exception:
-                    pass
-            if os.path.exists(legacy_dropin):
-                try:
-                    os.remove(legacy_dropin)
-                except Exception:
-                    pass
-            if os.path.exists(daemon_json_path):
-                try:
-                    with open(daemon_json_path, "r", encoding="utf-8") as f:
-                        d_cfg = json.load(f)
-                    if "proxies" in d_cfg:
-                        del d_cfg["proxies"]
-                    with open(daemon_json_path, "w", encoding="utf-8") as f:
-                        json.dump(d_cfg, f, indent=2)
-                except Exception:
-                    pass
+        # 2. Ensure daemon pull proxy drop-in is active
+        try:
+            _set_daemon_dropin()
+        except Exception as e:
+            print(f"Warning: could not write systemd dropin: {e}")
+
+        # UFW rule & boot order
+        subprocess.run(f"ufw allow from 172.16.0.0/12 to any port {PORT_HTTP} proto tcp comment 'Docker bridge to sing-box client' >/dev/null 2>&1 || true", shell=True)
+        subprocess.run(["systemctl", "enable", "sing-box-client"], stderr=subprocess.DEVNULL)
+        subprocess.run(["systemctl", "enable", "docker"], stderr=subprocess.DEVNULL)
 
         print("Restarting Docker service...")
         subprocess.run(["systemctl", "daemon-reload"])
         subprocess.run(["systemctl", "restart", "docker"])
-        print(f"{COLOR_YELLOW}[!] Docker container auto-proxy DISABLED (On-Demand Mode Active).{COLOR_RESET}")
-        print(f"    - Containers:  Default to DIRECT connection (no proxy).")
-        print(f"    - On-Demand:   Run with {COLOR_CYAN}dproxy run ...{COLOR_RESET} to use proxy.")
-        if not purge_all:
-            print(f"    - Image Pulls: {COLOR_GREEN}docker pull remains accelerated{COLOR_RESET} via sing-box proxy.")
-            print(f"    - Boot Order:  {COLOR_GREEN}docker.service remains ordered after sing-box-client{COLOR_RESET}.")
+        print(f"{COLOR_GREEN}[✓] Docker proxy switched to: PULL-ONLY (On-Demand Mode){COLOR_RESET}")
+        print(f"    - Image Pulls: {COLOR_GREEN}docker pull accelerated{COLOR_RESET} via http://127.0.0.1:{PORT_HTTP}")
+        print(f"    - Containers:  {COLOR_CYAN}Default to DIRECT connection{COLOR_RESET} (no proxy injected).")
+        print(f"    - On-Demand:   Run with {COLOR_CYAN}dproxy run ...{COLOR_RESET} or specify HTTP_PROXY in docker-compose.yml.")
+        return 0
+
+    elif action in ("off", "disable", "none", "purge"):
+        print("Switching Docker proxy to [Mode 3: OFF (Disabled)]...")
+        # 1. Remove client/container auto-injection
+        _remove_client_proxies()
+        # 2. Remove daemon pull proxy drop-in
+        _remove_daemon_dropin()
+        # 3. Clean daemon.json proxies
+        _remove_daemon_json_proxies()
+
+        print("Restarting Docker service...")
+        subprocess.run(["systemctl", "daemon-reload"])
+        subprocess.run(["systemctl", "restart", "docker"])
+        print(f"{COLOR_YELLOW}[!] Docker proxy switched to: OFF (Completely Disabled){COLOR_RESET}")
+        print(f"    - Image Pulls: DIRECT (no proxy).")
+        print(f"    - Containers:  DIRECT (no proxy).")
         return 0
 
     elif action == "test":
-        print("Testing Docker container internet connection through proxy...")
+        print("Testing Docker container internet connection...")
         try:
             out = subprocess.check_output(
                 ["docker", "run", "--rm", "curlimages/curl:latest", "-s", "https://api.ipify.org"],
-                timeout=10,
+                timeout=15,
             ).decode().strip()
-            print(f"{COLOR_GREEN}[✓] Docker container test successful! Outbound IP: {out}{COLOR_RESET}")
-            return 0
+            print(f"{COLOR_GREEN}[✓] Default container test outbound IP: {out}{COLOR_RESET}")
         except Exception as e:
-            print(f"{COLOR_RED}[✗] Docker container test failed: {e}{COLOR_RESET}")
-            return 1
+            print(f"{COLOR_RED}[✗] Default container test failed: {e}{COLOR_RESET}")
+
+        if os.path.exists("/usr/local/bin/dproxy"):
+            print("Testing On-Demand proxy via 'dproxy'...")
+            try:
+                out = subprocess.check_output(
+                    ["dproxy", "run", "--rm", "curlimages/curl:latest", "-s", "https://api.ipify.org"],
+                    timeout=15,
+                ).decode().strip()
+                print(f"{COLOR_GREEN}[✓] On-Demand dproxy container outbound IP: {out}{COLOR_RESET}")
+            except Exception as e:
+                print(f"{COLOR_YELLOW}[!] dproxy test: {e}{COLOR_RESET}")
+        return 0
+    else:
+        print(f"{COLOR_RED}[✗] Unknown docker action: '{action}'{COLOR_RESET}")
+        print(f"Usage: pnode docker [all|pull|off|status|test]")
+        return 1
 
 
 def is_port_in_use(port, host="127.0.0.1"):
@@ -2066,7 +2104,7 @@ def print_help():
   {COLOR_CYAN}pnode test{COLOR_RESET}                 Test connectivity and latency across ALL active ports
   {COLOR_CYAN}pnode [port] test{COLOR_RESET}          Test connectivity on specific port (e.g. 'pnode 1081 test')
   {COLOR_CYAN}pnode [port] run <cmd...>{COLOR_RESET}  Run command with proxy environment injected
-  {COLOR_CYAN}pnode docker [action]{COLOR_RESET}      Manage Docker container proxy (status|on|off|test)
+  {COLOR_CYAN}pnode docker [mode]{COLOR_RESET}        Manage Docker proxy (all|pull|off|status|test)
 
 {COLOR_BOLD}Shell Integration:{COLOR_RESET}
   {COLOR_CYAN}proxy on [port]{COLOR_RESET}            Enable proxy in current shell (default: 1080, e.g. 'proxy on 1081')
