@@ -154,6 +154,12 @@ pnode 1081 香港           # fuzzy search by name on port 1081
 pnode ls                  # nodes on 1080
 pnode 1081 ls             # nodes on 1081 (or: pnode 1081)
 
+# Test latency of all nodes in active profile (concurrent ping):
+pnode ping                 # ping all nodes on 1080 in natural order
+pnode ping --sort          # ping all nodes and sort by latency (fastest first)
+pnode ping 日本            # ping only nodes matching '日本'
+pnode 1081 ping            # ping all nodes on port 1081 (or: pnode ping 1081)
+
 # Check active node name:
 pnode current             # current node on 1080
 pnode 1081 current        # current node on 1081
@@ -185,6 +191,11 @@ pnode stop all            # stop all secondary ports (keeps 1080 running)
 
 #### 3. Diagnostics & One-Shot Proxy Runner
 ```bash
+# Test latency of all nodes in active profile (concurrent ping):
+pnode ping                 # ping all nodes on 1080
+pnode ping --sort          # ping and rank fastest nodes first
+pnode 1081 ping            # ping all nodes on port 1081 (or: pnode ping 1081)
+
 # Test connectivity and latency across ALL active ports simultaneously:
 pnode test
 

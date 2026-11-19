@@ -15,6 +15,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 API_URL = "http://127.0.0.1:9090"
 PROXY_TAG = "proxy"
@@ -25,6 +26,9 @@ CURRENT_PROFILE_PATH = "/etc/sing-box-client/current_profile.txt"
 PORTS_DIR = "/etc/sing-box-client/ports"
 PORT_SERVICE_TEMPLATE = "/etc/systemd/system/sing-box-port@.service"
 PORT_HTTP = 1080
+
+DEFAULT_PING_URL = "http://cp.cloudflare.com/generate_204"
+DEFAULT_PING_TIMEOUT_MS = 3000
 
 COLOR_GREEN = "\033[32m"
 COLOR_YELLOW = "\033[33m"
@@ -344,6 +348,7 @@ def cmd_list(port=PORT_HTTP):
         print("-" * 68)
         print(f"Current active node: {COLOR_GREEN}{COLOR_BOLD}{now_node}{COLOR_RESET}")
         print(f"Switch node:    {COLOR_CYAN}pnode <#|name>{COLOR_RESET}        (e.g. 'pnode 2', 'pnode 日本')")
+        print(f"Test latency:   {COLOR_CYAN}pnode ping{COLOR_RESET}             (or: 'pnode ping --sort')")
         print(f"Switch profile: {COLOR_CYAN}pnode use <#|name>{COLOR_RESET}     (e.g. 'pnode use 1')")
         print(f"Multi-port:     {COLOR_CYAN}pnode 1081 use <#|name>{COLOR_RESET} (or: 'pnode add <profile>')\n")
         return 0
@@ -364,6 +369,207 @@ def cmd_list(port=PORT_HTTP):
                 pass
         print("Please check if sing-box-client is running: systemctl status sing-box-client")
         return 1
+
+
+def cmd_ping(port=PORT_HTTP, target=None, sort_by_latency=False, timeout_ms=None, test_url=None):
+    if not port:
+        port = PORT_HTTP
+    try:
+        port = int(port)
+    except Exception:
+        port = PORT_HTTP
+
+    if not test_url:
+        test_url = os.environ.get("PNODE_PING_URL", DEFAULT_PING_URL)
+    if timeout_ms is None:
+        try:
+            timeout_ms = int(os.environ.get("PNODE_PING_TIMEOUT", DEFAULT_PING_TIMEOUT_MS))
+        except Exception:
+            timeout_ms = DEFAULT_PING_TIMEOUT_MS
+
+    if port == PORT_HTTP:
+        api_port = 9090
+        prof_name = get_current_profile_name() or "clash-sub"
+        running = True
+    else:
+        bound = get_bound_ports()
+        if port not in bound:
+            print(f"{COLOR_RED}[✗] Port {port} is not bound. Run 'pnode {port} use <profile>' to start it.{COLOR_RESET}")
+            return 1
+        p_info = bound[port]
+        api_port = p_info.get("api_port")
+        prof_name = p_info.get("profile", "unknown")
+        running = p_info.get("is_running", False)
+
+    if not api_port or not running:
+        print(f"{COLOR_RED}[✗] Port {port} (Profile: '{prof_name}') service is not running.{COLOR_RESET}")
+        return 1
+
+    api_url = f"http://127.0.0.1:{api_port}"
+    try:
+        req = urllib.request.Request(f"{api_url}/proxies", headers={"User-Agent": "proxy-node/1.0"})
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        print(f"{COLOR_YELLOW}[!] Cannot connect to Clash API on port {api_port}: {e}{COLOR_RESET}")
+        print("Please check if the sing-box service is running: systemctl status sing-box-client")
+        return 1
+
+    proxies_map = data.get("proxies", {})
+    selector = proxies_map.get(PROXY_TAG, {})
+    if not selector:
+        for k, v in proxies_map.items():
+            if v.get("type") == "Selector":
+                selector = v
+                break
+
+    now_node = selector.get("now", "")
+    all_nodes = selector.get("all", [])
+
+    if not all_nodes:
+        candidate_nodes = [
+            k for k, v in proxies_map.items()
+            if v.get("type") not in ("Selector", "Fallback", "URLTest", "Direct", "Reject")
+            and k not in ("GLOBAL", "direct", "block", "dns")
+        ]
+        if candidate_nodes:
+            all_nodes = candidate_nodes
+            if not now_node:
+                now_node = candidate_nodes[0]
+
+    if not all_nodes:
+        print(f"{COLOR_YELLOW}[!] No proxy nodes found to ping on Port {port} (Profile: '{prof_name}').{COLOR_RESET}")
+        return 0
+
+    indexed_nodes = list(enumerate(all_nodes, 1))
+
+    if target:
+        target_str = str(target).strip()
+        if target_str.isdigit():
+            target_idx = int(target_str)
+            filtered = [(idx, name) for idx, name in indexed_nodes if idx == target_idx]
+            if not filtered:
+                print(f"{COLOR_RED}[✗] Node #{target_idx} is out of range [1-{len(all_nodes)}].{COLOR_RESET}")
+                return 1
+            indexed_nodes = filtered
+        else:
+            filtered = [(idx, name) for idx, name in indexed_nodes if target_str.lower() in name.lower()]
+            if not filtered:
+                print(f"{COLOR_RED}[✗] No nodes matched '{target_str}'.{COLOR_RESET}")
+                return 1
+            indexed_nodes = filtered
+
+    target_desc = f" matching '{target}'" if target else ""
+    print(f"Pinging {len(indexed_nodes)} node{'s' if len(indexed_nodes) > 1 else ''}{target_desc} on Port {port} (Profile: {prof_name}) ...", flush=True)
+
+    def ping_single(idx, name):
+        tag = urllib.parse.quote(name, safe="")
+        delay_url = f"{api_url}/proxies/{tag}/delay?timeout={timeout_ms}&url={urllib.parse.quote(test_url, safe=':/?&=')}"
+        info = proxies_map.get(name, {})
+        ntype = info.get("type", "Proxy")
+        req = urllib.request.Request(delay_url, headers={"User-Agent": "proxy-node/1.0"})
+        try:
+            with urllib.request.urlopen(req, timeout=(timeout_ms / 1000.0) + 1.5) as resp:
+                res = json.loads(resp.read().decode("utf-8"))
+                delay = res.get("delay")
+                return {"idx": idx, "name": name, "type": ntype, "delay": delay, "error": None}
+        except urllib.error.HTTPError as e:
+            try:
+                err_data = json.loads(e.read().decode("utf-8"))
+                msg = err_data.get("message", "")
+            except Exception:
+                msg = ""
+            if e.code == 504 or "timeout" in msg.lower():
+                err = "Timeout"
+            elif e.code == 503:
+                err = "Unavailable"
+            else:
+                err = msg or f"HTTP {e.code}"
+            return {"idx": idx, "name": name, "type": ntype, "delay": None, "error": err}
+        except Exception:
+            return {"idx": idx, "name": name, "type": ntype, "delay": None, "error": "Timeout"}
+
+    worker_count = min(25, max(4, len(indexed_nodes)))
+    results = []
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futs = [executor.submit(ping_single, idx, name) for idx, name in indexed_nodes]
+        for f in as_completed(futs):
+            results.append(f.result())
+
+    if sort_by_latency:
+        results.sort(key=lambda x: (
+            0 if (x["delay"] is not None and x["delay"] >= 0) else 1,
+            x["delay"] if (x["delay"] is not None and x["delay"] >= 0) else 999999,
+            x["idx"]
+        ))
+    else:
+        results.sort(key=lambda x: x["idx"])
+
+    sort_tag = " [Sorted]" if sort_by_latency else ""
+    prof_header = f" (Profile: {prof_name})" if prof_name else ""
+    print(f"\n{COLOR_BOLD}{COLOR_CYAN}=== Proxy Node Latency (Port {port}){prof_header}{sort_tag} ({len(results)} total) ==={COLOR_RESET}")
+    print("-" * 74)
+    h_num, h_type, h_lat, h_status, h_name = "#", "Type", "Latency", "Status", "Node Name"
+    print(f" {h_num:<4} {h_type:<12} {h_lat:<12} {h_status:<12} {h_name}")
+    print("-" * 74)
+
+    for r in results:
+        idx = r["idx"]
+        ntype = r["type"]
+        name = r["name"]
+        delay = r["delay"]
+        err = r["error"]
+
+        if delay is not None and delay >= 0:
+            lat_text = f"{delay} ms"
+            color = COLOR_GREEN if delay < 400 else (COLOR_CYAN if delay < 800 else COLOR_YELLOW)
+            lat_col = f"{color}{lat_text:<12}{COLOR_RESET}"
+        else:
+            err_text = err or "Timeout"
+            lat_col = f"{COLOR_RED}{err_text:<12}{COLOR_RESET}"
+
+        if name == now_node:
+            st_text = "[*] Active"
+            st_col = f"{COLOR_GREEN}{COLOR_BOLD}{st_text:<12}{COLOR_RESET}"
+            name_col = f"{COLOR_GREEN}{COLOR_BOLD}{name}{COLOR_RESET}"
+        else:
+            st_text = ""
+            st_col = f"{st_text:<12}"
+            name_col = name
+
+        print(f" {idx:<4} {ntype:<12} {lat_col} {st_col} {name_col}")
+
+    print("-" * 74)
+    online_nodes = [r for r in results if r["delay"] is not None and r["delay"] >= 0]
+    total_count = len(results)
+    online_count = len(online_nodes)
+    pct = int(online_count / total_count * 100) if total_count else 0
+    fastest = min(online_nodes, key=lambda x: x["delay"]) if online_nodes else None
+
+    summary_parts = [f"Summary: {COLOR_BOLD}{online_count} / {total_count}{COLOR_RESET} nodes online ({pct}%)"]
+    if fastest:
+        summary_parts.append(f"Fastest: {COLOR_GREEN}{COLOR_BOLD}{fastest['delay']} ms{COLOR_RESET} (#{fastest['idx']} {fastest['name']})")
+    print(" | ".join(summary_parts))
+
+    if now_node:
+        now_result = next((r for r in results if r["name"] == now_node), None)
+        if now_result and now_result["delay"] is not None:
+            print(f"Current active node: {COLOR_GREEN}{COLOR_BOLD}{now_node}{COLOR_RESET} ({now_result['delay']} ms)")
+        elif now_result:
+            print(f"Current active node: {COLOR_RED}{COLOR_BOLD}{now_node}{COLOR_RESET} ({now_result.get('error') or 'Timeout'})")
+        else:
+            print(f"Current active node: {COLOR_GREEN}{COLOR_BOLD}{now_node}{COLOR_RESET}")
+
+    port_prefix = f"{port} " if port != PORT_HTTP else ""
+    if fastest and fastest["name"] != now_node:
+        print(f"Switch to fastest:   {COLOR_CYAN}pnode {port_prefix}{fastest['idx']}{COLOR_RESET}        (switches to {fastest['name']})")
+    print(f"Switch node:         {COLOR_CYAN}pnode {port_prefix}<#|name>{COLOR_RESET}   (e.g. 'pnode {port_prefix}10', 'pnode {port_prefix}日本')")
+    if not sort_by_latency:
+        print(f"Sort by latency:     {COLOR_CYAN}pnode {port_prefix}ping --sort{COLOR_RESET}\n")
+    else:
+        print(f"Natural order:       {COLOR_CYAN}pnode {port_prefix}ping{COLOR_RESET}\n")
+
+    return 0
 
 
 def cmd_profile_list(args=None):
@@ -1585,7 +1791,8 @@ def cmd_port_nodes(port):
                 print(f" {idx:<4} {ntype:<12} {'':<12} {name}")
         print("-" * 68)
         print(f"Current active node (Port {port}): {COLOR_GREEN}{COLOR_BOLD}{now_node}{COLOR_RESET}")
-        print(f"Switch node: {COLOR_CYAN}pnode {port} <#|name>{COLOR_RESET}   (e.g. 'pnode {port} 2', 'pnode {port} 日本')\n")
+        print(f"Switch node:  {COLOR_CYAN}pnode {port} <#|name>{COLOR_RESET}   (e.g. 'pnode {port} 2', 'pnode {port} 日本')")
+        print(f"Test latency: {COLOR_CYAN}pnode {port} ping{COLOR_RESET}       (or: 'pnode {port} ping --sort')\n")
         return 0
     except Exception as e:
         print(f"{COLOR_RED}[✗] Cannot connect to Clash API on port {api_port}: {e}{COLOR_RESET}")
@@ -2084,6 +2291,7 @@ def print_help():
   {COLOR_CYAN}pnode <#|name>{COLOR_RESET}             Switch node on 1080 (e.g. 'pnode 2', 'pnode 日本')
   {COLOR_CYAN}pnode <port> <#|name>{COLOR_RESET}      Switch node on specific port (e.g. 'pnode 1081 2')
   {COLOR_CYAN}pnode [port] ls{COLOR_RESET}            List all available nodes on port (default: 1080)
+  {COLOR_CYAN}pnode [port] ping [--sort]{COLOR_RESET} Test latency across all nodes in active profile
   {COLOR_CYAN}pnode [port] switch{COLOR_RESET}        Interactive node selector
   {COLOR_CYAN}pnode [port] current{COLOR_RESET}       Show active node name
 
@@ -2102,6 +2310,8 @@ def print_help():
   {COLOR_CYAN}pnode update [profile]{COLOR_RESET}     Update subscription nodes
 
 {COLOR_BOLD}Diagnostics & Tools:{COLOR_RESET}
+  {COLOR_CYAN}pnode ping [--sort]{COLOR_RESET}        Test latency across all nodes in active profile
+  {COLOR_CYAN}pnode [port] ping{COLOR_RESET}          Test latency across all nodes on specific port
   {COLOR_CYAN}pnode test{COLOR_RESET}                 Test connectivity and latency across ALL active ports
   {COLOR_CYAN}pnode [port] test{COLOR_RESET}          Test connectivity on specific port (e.g. 'pnode 1081 test')
   {COLOR_CYAN}pnode [port] run <cmd...>{COLOR_RESET}  Run command with proxy environment injected
@@ -2159,6 +2369,49 @@ def main():
         sys.exit(cmd_dashboard() or 0)
     elif cmd in ("ls", "list"):
         sys.exit(cmd_list(port) or 0)
+    elif cmd in ("ping", "latency", "delay"):
+        sort_by_latency = False
+        target = None
+        ping_port = port
+        timeout_ms = None
+        test_url = None
+
+        i = 0
+        filtered_args = []
+        while i < len(sub_args):
+            arg = sub_args[i]
+            if arg in ("--sort", "-s", "sort"):
+                sort_by_latency = True
+            elif arg in ("--timeout", "-t") and i + 1 < len(sub_args):
+                try:
+                    timeout_ms = int(sub_args[i + 1])
+                    i += 1
+                except Exception:
+                    pass
+            elif arg.startswith("--timeout="):
+                try:
+                    timeout_ms = int(arg.split("=", 1)[1])
+                except Exception:
+                    pass
+            elif arg in ("--url", "-u") and i + 1 < len(sub_args):
+                test_url = sub_args[i + 1]
+                i += 1
+            elif arg.startswith("--url="):
+                test_url = arg.split("=", 1)[1]
+            else:
+                filtered_args.append(arg)
+            i += 1
+
+        if filtered_args:
+            first = filtered_args[0]
+            if not has_explicit_port and first.isdigit() and int(first) >= 1024:
+                ping_port = int(first)
+                if len(filtered_args) > 1:
+                    target = filtered_args[1]
+            else:
+                target = first
+
+        sys.exit(cmd_ping(ping_port, target=target, sort_by_latency=sort_by_latency, timeout_ms=timeout_ms, test_url=test_url) or 0)
     elif cmd in ("current", "cur"):
         cmd_current(port)
     elif cmd == "switch":

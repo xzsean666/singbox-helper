@@ -94,8 +94,14 @@ pnode 1081 switch
 ```
 终端会列出所有可用节点，输入序号回车即可生效。
 
-### 4. 切换后验证
+### 4. 节点测速与切换后验证
 ```bash
+# 并发测速当前 Profile 所有节点延迟（支持自然排序与测速排序）：
+pnode ping                 # 查看 1080 所有节点延迟
+pnode ping --sort          # 延迟升序排列，最快节点置顶
+pnode 1081 ping            # 查看 1081 端口对应 Profile 的所有节点延迟
+pnode ping 日本            # 仅测试包含“日本”的节点延迟
+
 # 查看当前 1081 正在生效的节点名称：
 pnode 1081 current
 
@@ -284,6 +290,9 @@ pnode 1082 run curl ipinfo.io
 # ========== 看板与连通性 ==========
 pnode                     # 查看端口仪表板 (多端口运行时) 或 1080 节点列表
 pnode dashboard           # 强制展示所有活跃端口运行看板
+pnode ping                # 并发测试 1080 当前 Profile 所有节点延迟
+pnode ping --sort         # 并发测速并按延迟由低到高排序 (最快置顶)
+pnode 1081 ping           # 测试 1081 端口 Profile 所有节点延迟
 pnode test                # 全端口并发测试延迟与公网 IP
 pnode 1081 test           # 仅测试 1081 端口
 pnode 1081 current        # 查看 1081 当前生效节点名
